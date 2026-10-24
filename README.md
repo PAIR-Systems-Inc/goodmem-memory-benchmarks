@@ -63,6 +63,13 @@ strongest agentic system in the paper's comparison — on both `gpt-4.1-mini` ro
 The paper-models configuration reaches that on **~2,700 evidence tokens against
 the paper's ~4,800**, a little over half the context budget.
 
+> **Caveat, and it is a real one:** neither reranker the paper used was available
+> in working order on the instance these runs used, so no configuration here is an
+> exact reproduction of a published row. Cohere Rerank-v3.5 needs a credential the
+> instance does not have; Qwen3-Reranker-4B is present but its endpoint returns
+> scores that are not relevance. See [On the reranker](#on-the-reranker--and-a-comparability-gap-you-should-know-about)
+> for the measurements and the one command that closes the gap.
+
 ### How to read a verdict
 
 Every score carries a bootstrap 95% interval over per-question means. "Tie" means
@@ -120,7 +127,11 @@ something reassembled from chunk offsets.
   sweep of 400 against 800 moved coverage by 0.00 points, so recall is not
   binding at this depth.
 
-### On the reranker
+### On the reranker — and a comparability gap you should know about
+
+**Neither reranker the paper used was available in working order, so no run here
+is an exact reproduction of a published row.** This is the most important caveat
+in the repository and it is stated before the numbers for that reason.
 
 The paper reports two LoCoMo settings, which land within 0.06 points of each
 other for the `gpt-4o-mini` reader:
@@ -130,19 +141,46 @@ other for the `gpt-4o-mini` reader:
 | Table 10 | `text-embedding-3-small` | Cohere Rerank-v3.5 | 89.07 / 93.70 |
 | Table 11 | Qwen3-Embedding-4B | Qwen3-Reranker-4B | 89.13 / 94.55 |
 
-The **Paper models** configuration pairs the embedder from the first with the
-reranker from the second, because those are the two paper-native components
-available on the instance this was run against: there is no Cohere credential
-there, and Qwen3-Embedding-4B is not served. It is therefore not an exact
-reproduction of either row, and the two rows bracket tightly enough to make the
-target unambiguous either way.
+What happened to each:
 
-The **Voyage** configuration swaps in stronger current models
-(`voyage-4-large` + `rerank-2.5`) and is reported as a separate row rather than
-as the headline, because a newer reranker beating an older one says nothing about
-the memory system. Note for anyone extending this: Voyage shipped `rerank-3` on
-2026-09-30, which claims to beat Cohere Rerank-v4.0 Pro; this repository does not
-use it, for the same reason.
+- **Cohere Rerank-v3.5** — no Cohere credential on the instance these runs used.
+  Nothing to diagnose; it simply was not reachable.
+- **Qwen3-Reranker-4B** — the exact checkpoint *was* present, served over vLLM,
+  and it does not work. Measured against LoCoMo's annotated evidence it puts the
+  correct turn in the top-15 **16.7%** of the time, against **75.0%** for doing
+  no reranking at all. For the question *"When did Caroline go to the LGBTQ
+  support group?"* it ranks the turn reading *"I went to a LGBTQ support group
+  yesterday"* **81st of 128**, with every score compressed into a 0.249–0.510
+  band. That narrow band is the signature of a generative reranker being scored
+  without its yes/no relevance head. Wrapping the query in the official
+  `<Instruct>:` / `<Query>:` envelope made it worse (11.1%), sorting ascending in
+  case the scores were inverted did not help, and the `/score` endpoint behaves
+  the same. It is not fixable from the client.
+
+So the **Paper models** configuration pairs the embedder from Table 10 with
+DashScope's hosted `qwen3-rerank` — the paper's reranker *family*, correctly
+served, which reaches 91.7% on the same measurement and is the best of every
+reranker available. It is the closest available approximation, not a
+reproduction.
+
+**To close this gap**, register Cohere Rerank-v3.5 on your instance, or serve
+Qwen3-Reranker-4B so that it applies its relevance template, then:
+
+```bash
+GMBENCH_RERANKER_ID=<the working reranker> \
+  gmbench --config config/locomo-paper.toml --run-tag exact-table-10 \
+          --ingest-tag paper-models retrieve
+```
+
+followed by `read`, `judge` and `export`. Nothing else changes — the embedder,
+chunking, depths, prompts and grading are already the paper's.
+
+### The Voyage configuration
+
+`voyage-4-large` + `rerank-2.5` is reported as a separate row, not the headline,
+because a model the paper did not use beating one it did says nothing about the
+memory system. Voyage also shipped `rerank-3` on 2026-09-30, which claims to beat
+Cohere Rerank-v4.0 Pro; this repository does not use it, for the same reason.
 
 ### A reranker can be worse than no reranker
 
