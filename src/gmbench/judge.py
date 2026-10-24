@@ -12,14 +12,14 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from openai import OpenAI
 from tqdm import tqdm
 
+from .client import GoodMemClient, GoodMemError
 from .config import RunConfig
 from .locomo import CATEGORY_NAMES
 from .prompts import JUDGE_SYSTEM, JUDGE_USER
@@ -97,7 +97,9 @@ def parse_label(response: str) -> str | None:
     return None
 
 
-def _judge_once(client: OpenAI, config: RunConfig, answer: AnswerRecord) -> tuple[int, str]:
+def _judge_once(
+    client: GoodMemClient, config: RunConfig, answer: AnswerRecord
+) -> tuple[int, str]:
     """Requests one judgement; any failure scores zero and stays in the denominator."""
     prompt = JUDGE_USER.format(
         question=answer.question,
@@ -105,15 +107,15 @@ def _judge_once(client: OpenAI, config: RunConfig, answer: AnswerRecord) -> tupl
         generated_answer=answer.final_answer,
     )
     try:
-        response = client.chat.completions.create(
-            model=config.models.judge_model,
-            messages=[
+        text = client.chat_completion(
+            config.models.judge_llm_id,
+            [
                 {"role": "system", "content": JUDGE_SYSTEM},
                 {"role": "user", "content": prompt},
             ],
+            model=config.models.judge_model,
             temperature=0.0,
         )
-        text = response.choices[0].message.content or ""
     except Exception as exc:  # noqa: BLE001 - scored zero, per the paper
         return 0, f"ERROR:{type(exc).__name__}"
 
@@ -123,7 +125,9 @@ def _judge_once(client: OpenAI, config: RunConfig, answer: AnswerRecord) -> tupl
     return (1 if label == "CORRECT" else 0), label
 
 
-def _judge_answer(client: OpenAI, config: RunConfig, answer: AnswerRecord) -> JudgeRecord:
+def _judge_answer(
+    client: GoodMemClient, config: RunConfig, answer: AnswerRecord
+) -> JudgeRecord:
     """Collects the configured number of independent judgements for one answer."""
     record = JudgeRecord(
         qid=answer.qid, conversation_id=answer.conversation_id, category=answer.category
@@ -135,38 +139,45 @@ def _judge_answer(client: OpenAI, config: RunConfig, answer: AnswerRecord) -> Ju
     return record
 
 
-def run(config: RunConfig, answers: list[AnswerRecord]) -> list[JudgeRecord]:
+def run(
+    client: GoodMemClient, config: RunConfig, answers: list[AnswerRecord]
+) -> list[JudgeRecord]:
     """Grades every answer and writes the judgements to the run directory.
 
     Args:
+      client: Connected GoodMem client, used as the inference proxy.
       config: Active run configuration.
       answers: Answers to grade.
 
     Returns:
-      One judge record per answer, in input order.
-    """
-    if not config.openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set; the judge stage needs it")
-    client = OpenAI(api_key=config.openai_api_key)
+      One judge record per answer.
 
-    records: list[JudgeRecord] = [None] * len(answers)  # type: ignore[list-item]
+    Raises:
+      GoodMemError: If no judge LLM registration is configured.
+    """
+    if not config.models.judge_llm_id:
+        raise GoodMemError("models.judge_llm_id is not configured")
+
+    records: list[JudgeRecord | None] = [None] * len(answers)
+    path = judgements_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
     total = len(answers) * config.models.judge_repetitions
+
     with tqdm(total=total, desc=f"judge:{config.models.judge_model}", unit="j") as bar:
         with ThreadPoolExecutor(max_workers=config.reader_concurrency) as pool:
             futures = {
                 pool.submit(_judge_answer, client, config, answer): index
                 for index, answer in enumerate(answers)
             }
-            for future, index in futures.items():
-                records[index] = future.result()
+            for future in as_completed(futures):
+                records[futures[future]] = future.result()
                 bar.update(config.models.judge_repetitions)
 
-    path = judgements_path(config)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    done = [record for record in records if record is not None]
     with path.open("w") as handle:
-        for record in records:
+        for record in done:
             handle.write(json.dumps(record.to_json()) + "\n")
-    return records
+    return done
 
 
 def accuracy_by_category(records: list[JudgeRecord]) -> dict[str, tuple[int, float]]:

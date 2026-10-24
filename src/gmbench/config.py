@@ -25,6 +25,7 @@ class ServerConfig:
     tls_verify: bool = False
     timeout_seconds: float = 300.0
     requests_per_second: float = 5.0
+    llm_requests_per_second: float = 15.0
 
     @classmethod
     def from_env(cls, table: dict[str, Any]) -> Self:
@@ -35,6 +36,9 @@ class ServerConfig:
             timeout_seconds=float(table.get("timeout_seconds", cls.timeout_seconds)),
             requests_per_second=float(
                 table.get("requests_per_second", cls.requests_per_second)
+            ),
+            llm_requests_per_second=float(
+                table.get("llm_requests_per_second", cls.llm_requests_per_second)
             ),
         )
 
@@ -49,6 +53,23 @@ class ModelConfig:
     judge_model: str = "gpt-4o-mini-2024-07-18"
     reader_max_tokens: int = 4096
     judge_repetitions: int = 3
+    # Reader and judge run through GoodMem's provider proxy, keyed by model name
+    # so --reader-model selects both the model and the registration to route it.
+    reader_llm_ids: tuple[tuple[str, str], ...] = ()
+    judge_llm_id: str = ""
+
+    def llm_id_for(self, model: str) -> str:
+        """Returns the registered LLM id that serves ``model``.
+
+        Raises:
+          KeyError: If no registration is configured for the model.
+        """
+        for name, llm_id in self.reader_llm_ids:
+            if name == model:
+                return llm_id
+        raise KeyError(
+            f"no reader_llm_ids entry for model {model!r}; add one to the run TOML"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,7 +159,14 @@ def _dataclass_from(cls: type, table: dict[str, Any]) -> Any:
     for key, value in table.items():
         if key not in fields:
             continue
-        kwargs[key] = tuple(value) if isinstance(value, list) else value
+        if isinstance(value, dict):
+            # A TOML table of model name to LLM id becomes a tuple of pairs so
+            # the config stays hashable and frozen.
+            kwargs[key] = tuple(sorted(value.items()))
+        elif isinstance(value, list):
+            kwargs[key] = tuple(value)
+        else:
+            kwargs[key] = value
     return cls(**kwargs)
 
 

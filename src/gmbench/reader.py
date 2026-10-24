@@ -1,22 +1,26 @@
 """Reader stage: turn retrieved evidence into an answer.
 
-The reader runs against OpenAI directly rather than through GoodMem so the
-prompt is byte-identical to the paper's. GoodMem is the retrieval system under
-test here; routing generation through it as well would mix the two.
+Calls go through GoodMem's provider proxy, which forwards to the registered
+upstream model and injects the stored credential. That keeps the provider key
+out of this process while still sending the paper's prompt verbatim -- the proxy
+passes the body through, so nothing here is reshaped by GoodMem's own
+post-processing. The reader is held at the paper's model on purpose: GoodMem is
+the retrieval system under test, and a stronger reader would raise the score
+without saying anything about retrieval.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from openai import OpenAI
 from tqdm import tqdm
 
+from .client import GoodMemClient, GoodMemError
 from .config import RunConfig
 from .prompts import LOCOMO_READER
 from .retrieve import RetrievalRecord
@@ -69,20 +73,24 @@ def extract_final_answer(response: str) -> str:
 
 
 def _answer_one(
-    client: OpenAI, config: RunConfig, record: RetrievalRecord
+    client: GoodMemClient, config: RunConfig, llm_id: str, record: RetrievalRecord
 ) -> AnswerRecord:
-    """Runs the reader for one question."""
+    """Runs the reader for one question.
+
+    The paper's reader prompt is a single user message with no system message,
+    and evaluation reads the text after ``FINAL ANSWER:``.
+    """
     prompt = LOCOMO_READER.format(context=record.context, question=record.question)
     generated = ""
     error: str | None = None
     try:
-        response = client.chat.completions.create(
+        generated = client.chat_completion(
+            llm_id,
+            [{"role": "user", "content": prompt}],
             model=config.models.reader_model,
-            messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
             max_tokens=config.models.reader_max_tokens,
         )
-        generated = response.choices[0].message.content or ""
     except Exception as exc:  # noqa: BLE001 - recorded, then scored as a failure
         error = f"{type(exc).__name__}: {exc}"
 
@@ -98,37 +106,46 @@ def _answer_one(
     )
 
 
-def run(config: RunConfig, records: list[RetrievalRecord]) -> list[AnswerRecord]:
+def run(
+    client: GoodMemClient, config: RunConfig, records: list[RetrievalRecord]
+) -> list[AnswerRecord]:
     """Generates an answer per retrieval record and writes them to the run directory.
 
     Args:
+      client: Connected GoodMem client, used as the inference proxy.
       config: Active run configuration.
       records: Retrieval records to answer.
 
     Returns:
       One answer record per input record, in input order.
-    """
-    if not config.openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set; the reader stage needs it")
-    client = OpenAI(api_key=config.openai_api_key)
 
-    answers: list[AnswerRecord] = [None] * len(records)  # type: ignore[list-item]
+    Raises:
+      GoodMemError: If no LLM registration is configured for the reader model.
+    """
+    try:
+        llm_id = config.models.llm_id_for(config.models.reader_model)
+    except KeyError as exc:
+        raise GoodMemError(str(exc)) from exc
+
+    answers: list[AnswerRecord | None] = [None] * len(records)
+    path = answers_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
     with tqdm(total=len(records), desc=f"read:{config.models.reader_model}", unit="q") as bar:
         with ThreadPoolExecutor(max_workers=config.reader_concurrency) as pool:
             futures = {
-                pool.submit(_answer_one, client, config, record): index
+                pool.submit(_answer_one, client, config, llm_id, record): index
                 for index, record in enumerate(records)
             }
-            for future, index in futures.items():
-                answers[index] = future.result()
+            for future in as_completed(futures):
+                answers[futures[future]] = future.result()
                 bar.update(1)
 
-    path = answers_path(config)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    done = [answer for answer in answers if answer is not None]
     with path.open("w") as handle:
-        for answer in answers:
+        for answer in done:
             handle.write(json.dumps(answer.to_json()) + "\n")
-    return answers
+    return done
 
 
 def load_answers(config: RunConfig) -> list[AnswerRecord]:

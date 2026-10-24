@@ -31,6 +31,9 @@ _MAX_BACKOFF_SECONDS = 30.0
 # starts answering 429. Pacing under that is what makes a thousands-of-requests
 # run finish; retries alone just rediscover the ceiling on every call.
 _DEFAULT_REQUESTS_PER_SECOND = 5.0
+# Proxied LLM calls are served by the upstream provider rather than by GoodMem's
+# own query path, so they get their own, looser budget.
+_DEFAULT_LLM_REQUESTS_PER_SECOND = 15.0
 
 _T = TypeVar("_T")
 
@@ -62,11 +65,13 @@ class GoodMemClient:
         timeout_seconds: float = 300.0,
         max_attempts: int = _MAX_ATTEMPTS,
         requests_per_second: float = _DEFAULT_REQUESTS_PER_SECOND,
+        llm_requests_per_second: float = _DEFAULT_LLM_REQUESTS_PER_SECOND,
     ) -> None:
         if not api_key:
             raise GoodMemError("GOODMEM_API_KEY is not set")
         self._max_attempts = max(1, max_attempts)
         self._limiter = RateLimiter(requests_per_second)
+        self._llm_limiter = RateLimiter(llm_requests_per_second)
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
             headers={"x-api-key": api_key, "Content-Type": "application/json"},
@@ -86,7 +91,12 @@ class GoodMemClient:
 
     # -- plumbing ----------------------------------------------------------
 
-    def _with_retries(self, describe: str, attempt_fn: Callable[[], _T]) -> _T:
+    def _with_retries(
+        self,
+        describe: str,
+        attempt_fn: Callable[[], _T],
+        limiter: RateLimiter | None = None,
+    ) -> _T:
         """Runs ``attempt_fn``, retrying throttled and transient failures.
 
         Args:
@@ -100,9 +110,10 @@ class GoodMemClient:
         Raises:
           GoodMemError: If every attempt was throttled or transient.
         """
+        bucket = limiter or self._limiter
         last: _Throttled | None = None
         for attempt in range(self._max_attempts):
-            self._limiter.acquire()
+            bucket.acquire()
             try:
                 return attempt_fn()
             except _Throttled as throttled:
@@ -113,7 +124,7 @@ class GoodMemClient:
                 # Stand the whole pool down, not just this worker: the budget is
                 # shared, so letting the others keep firing guarantees the retry
                 # arrives into an empty bucket again.
-                self._limiter.pause(delay)
+                bucket.pause(delay)
                 time.sleep(delay)
         assert last is not None
         raise GoodMemError(
@@ -214,6 +225,66 @@ class GoodMemClient:
     def delete_memory(self, memory_id: str) -> None:
         """Deletes one memory."""
         self._request("DELETE", f"/v1/memories/{memory_id}")
+
+    # -- proxied inference -------------------------------------------------
+
+    def chat_completion(
+        self,
+        llm_id: str,
+        messages: list[dict[str, str]],
+        *,
+        model: str,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
+        """Runs a chat completion through GoodMem's provider proxy.
+
+        The proxy forwards to the registered upstream endpoint and injects the
+        stored credential, so the benchmark can hold the reader and judge
+        prompts byte-identical to the paper's without the provider key ever
+        reaching this process.
+
+        Args:
+          llm_id: UUID of the registered LLM to route through.
+          messages: Chat messages in OpenAI format.
+          model: Model identifier to request.
+          temperature: Sampling temperature, when the model accepts one.
+          max_tokens: Completion token cap.
+
+        Returns:
+          The assistant message content, or an empty string if absent.
+
+        Raises:
+          GoodMemError: If the proxy or the upstream provider rejects the call.
+        """
+        body: dict[str, Any] = {"model": model, "messages": messages}
+        if temperature is not None:
+            body["temperature"] = temperature
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
+
+        def attempt() -> str:
+            response = self._client.post(
+                f"/v1/proxy/llms/{llm_id}/chat/completions", json=body
+            )
+            if response.status_code in _RETRY_STATUS:
+                raise _Throttled(
+                    response.status_code, response.text[:600], _retry_after(response)
+                )
+            if response.status_code >= 400:
+                raise GoodMemError(
+                    f"chat_completion({model}) -> {response.status_code}: "
+                    f"{response.text[:400]}"
+                )
+            payload = response.json()
+            choices = payload.get("choices") or []
+            if not choices:
+                raise GoodMemError(f"chat_completion({model}) returned no choices")
+            return (choices[0].get("message") or {}).get("content") or ""
+
+        return self._with_retries(
+            f"POST /v1/proxy/llms/{llm_id}/chat/completions", attempt, self._llm_limiter
+        )
 
     # -- retrieval ---------------------------------------------------------
 

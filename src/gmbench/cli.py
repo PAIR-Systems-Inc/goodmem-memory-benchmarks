@@ -52,6 +52,7 @@ def _client(cfg: config_module.RunConfig) -> GoodMemClient:
         tls_verify=cfg.server.tls_verify,
         timeout_seconds=cfg.server.timeout_seconds,
         requests_per_second=cfg.server.requests_per_second,
+        llm_requests_per_second=cfg.server.llm_requests_per_second,
     )
 
 
@@ -137,7 +138,8 @@ def cmd_read(args: argparse.Namespace, console: Console) -> int:
     records = retrieve.load_records(cfg)
     if args.questions_limit:
         records = records[: args.questions_limit]
-    answers = reader.run(cfg, records)
+    with _client(cfg) as client:
+        answers = reader.run(client, cfg, records)
     failures = sum(1 for a in answers if a.error)
     console.print(f"[green]Generated {len(answers)} answers[/green] ({failures} errors)")
     return 0
@@ -146,7 +148,8 @@ def cmd_read(args: argparse.Namespace, console: Console) -> int:
 def cmd_judge(args: argparse.Namespace, console: Console) -> int:
     cfg = _load(args)
     answers = reader.load_answers(cfg)
-    records = judge.run(cfg, answers)
+    with _client(cfg) as client:
+        records = judge.run(client, cfg, answers)
     report.accuracy_table(judge.accuracy_by_category(records), cfg.models.reader_model, console)
     return 0
 
