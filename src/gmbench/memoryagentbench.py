@@ -1,24 +1,13 @@
-"""MemoryAgentBench: one ingested context, many heterogeneous questions.
+"""Load MemoryAgentBench and divide its contexts into searchable memories.
 
-The shape of this benchmark is "ingest once, query many". Each row is a single
-long context plus up to 500 questions about it, and the four capability groups
-ask quite different things of the same stored representation: locate a fact,
-apply demonstrations seen during ingestion, integrate clues across a whole book,
-or respect the precedence of numbered facts. Compression that helps one of those
-removes exactly what another needs, which is the point the benchmark makes.
+A block is one dataset row: a context shared by a set of questions. The release
+includes several context lengths for some sources. DEFAULT_VARIANTS selects one
+length per source, giving the 2,071 questions used in this comparison.
 
-Two things about the released data decide whether a reproduction is comparable:
-
-- **The shipped file is not the published question set.** It carries 22 ``source``
-  labels and 3,671 questions, because EventQA ships at three context lengths and
-  FactConsolidation at four. The published 2,071 is one length variant per
-  source. Counting labels naively over-reports by 77%, so the selection is
-  explicit here rather than implied.
-- **The ingestion unit differs per source.** A numbered fact, a chat session, a
-  labelled demonstration and a line of a novel are not interchangeable units,
-  and splitting them wrongly destroys the thing being measured -- most sharply
-  for FactConsolidation, where precedence lives in the serial number, and for
-  test-time learning, where an example and its label must stay together.
+The source also determines the unit of storage. A labelled example stays with
+its label; a numbered fact keeps the serial that establishes precedence.
+Longer prose is packed into passages, and chat windows retain their session
+timestamp. The runner uses the same source names to choose prompts and graders.
 """
 
 from __future__ import annotations
@@ -31,10 +20,8 @@ from typing import Any, Iterator
 
 from .client import GoodMemError
 
-# One length variant per source, which is what sums to the published 2,071.
-# EventQA and FactConsolidation are the only sources with a choice to make; the
-# paper reports per-length columns, so these are the defaults a reproduction of
-# the headline table needs, and they are overridable.
+# Choose one context length for EventQA and FactConsolidation. Callers can
+# override these defaults to evaluate another length.
 DEFAULT_VARIANTS: dict[str, str] = {
     "eventqa": "eventqa_131072",
     "factconsolidation_sh": "factconsolidation_sh_32k",
@@ -82,10 +69,8 @@ UNITS: dict[str, str] = {
     "factconsolidation_mh": UNIT_FACT,
 }
 
-# How each source is graded. Containment is wrong for three of them: a numeric
-# label needs exact equality (predicting 7 must not score for gold 71), a movie
-# recommendation needs recall over an id list, and a 1,000-word book summary
-# needs a judge against the keypoints the benchmark ships.
+# Graders follow the source's answer format. For example, numeric labels need
+# exact equality, while a summary receives credit for the keypoints it covers.
 GRADERS: dict[str, str] = {
     "eventqa": "contains",
     "longmemeval": "contains",
@@ -138,7 +123,7 @@ def base_source(label: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class Unit:
-    """One thing to store, with where it came from."""
+    """A passage to store, with its source identity and metadata."""
 
     unit_id: str
     text: str
@@ -221,16 +206,9 @@ def _split(context: str, kind: str, passage_chars: int) -> Iterator[Unit]:
         return
 
     if kind == UNIT_SESSION:
-        # A whole session is far too coarse a unit: they average about 14,000
-        # characters here, so one embedding has to stand for dozens of unrelated
-        # turns and cannot discriminate between them. The paper uses token
-        # windows for every MemoryAgentBench source except fact consolidation,
-        # and measured against this benchmark the session-level choice cost 40
-        # points on this source alone.
-        #
-        # Each window keeps the session's timestamp line, because these
-        # questions are date-sensitive and a window cut from the middle of a
-        # session would otherwise lose the only temporal anchor it has.
+        # A session may cover many unrelated subjects. Embed smaller windows
+        # so retrieval can select the relevant part. Repeat the timestamp in
+        # each window to preserve the date needed by temporal questions.
         ordinal = 0
         for session in _split_sessions(context):
             lines = session.split("\n")
@@ -249,19 +227,12 @@ def _split(context: str, kind: str, passage_chars: int) -> Iterator[Unit]:
 
 
 def _split_sessions(context: str) -> list[str]:
-    """Parses the LongMemEval source's stringified session list.
+    """Read dated sessions from LongMemEval's Python-literal context.
 
-    The context is a Python repr, so it is parsed as a literal rather than as
-    JSON. Its shape is *flat* and alternating -- ``['Chat Time: ...', [turns],
-    'Chat Time: ...', [turns], ...]`` -- not a list of (stamp, turns) pairs.
-    Reading it as pairs iterates the timestamp string character by character and
-    yields sessions made of single letters, which is a store that looks
-    populated and retrieves nothing.
-
-    Returns:
-      One rendered session per timestamp, or the whole context as a single unit
-      if it will not parse. Never an empty list: zero units would present an
-      empty store as a legitimately empty one.
+    The release alternates timestamps and turn lists:
+    ``['Chat Time: ...', [turns], 'Chat Time: ...', [turns], ...]``.
+    Render each session with its timestamp. If parsing fails, retain the whole
+    context as one unit so the source text is still available.
     """
     import ast
 
@@ -372,13 +343,10 @@ def load(
             events = meta.get("previous_events") or []
 
             def keypoints_for(index: int, count: int = len(qs)) -> tuple[str, ...]:
-                """Assigns a question its grading keypoints.
+                """Select the grading rubric for this question.
 
-                InfBench ships one question per block with 25 keypoints for it,
-                while DetectiveQA ships one keypoint per question. Taking the
-                i-th element in both cases hands InfBench a single keypoint out
-                of 25 and grades a book summary against a twenty-fifth of its
-                rubric.
+                InfBench's single question uses all of its block's keypoints. DetectiveQA
+                stores one keypoint per question, indexed by question position.
                 """
                 if not raw_keypoints:
                     return ()

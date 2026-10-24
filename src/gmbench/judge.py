@@ -1,10 +1,8 @@
-"""Judge stage: grade answers against the reference, following the paper's rules.
+"""Grade LoCoMo answers using the paper's appendix G.3 rules.
 
-The parsing and scoring rules below are the ones specified in appendix G.3 of
-the paper. They are strict on purpose: a bare ``CORRECT`` with no JSON envelope
-scores zero, and every failure mode stays in the denominator. Reproducing them
-exactly is what keeps a score comparable to the published one, since a laxer
-parser would quietly inflate it.
+Each answer receives three judgements by default. The parser looks for a JSON
+label; a bare CORRECT does not count. Failed calls and unusable labels contribute
+zero to the mean, and their counts are retained for the integrity report.
 """
 
 from __future__ import annotations
@@ -46,11 +44,10 @@ class JudgeRecord:
 
     @property
     def infrastructure_failures(self) -> int:
-        """Judgements that failed to reach the model at all.
+        """Count judgements that failed to reach the model.
 
-        The paper scores these zero and keeps them in the denominator, which
-        this harness matches so the number stays comparable. Counting them
-        separately is what stops an outage from passing as a low score.
+        These contribute zero to accuracy but remain separately visible in the
+        integrity report.
         """
         return sum(1 for label in self.labels if label.startswith("ERROR:"))
 
@@ -79,13 +76,11 @@ def judgements_path(config: RunConfig) -> Path:
 
 
 def parse_label(response: str) -> str | None:
-    """Extracts the judge's label using the paper's selection order.
+    """Read a JSON label using the paper's order of precedence.
 
-    Args:
-      response: Raw judge response text.
-
-    Returns:
-      The upper-cased label, or None when no usable JSON label is present.
+    Use the first fenced block if present, otherwise the first flat JSON object,
+    otherwise the entire response. Do not try a lower-priority form when the
+    selected one fails to parse. Return the uppercased label, or None.
     """
     if not response or not response.strip():
         return None

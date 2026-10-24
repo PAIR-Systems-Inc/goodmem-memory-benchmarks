@@ -1,9 +1,11 @@
-"""Thin GoodMem REST client covering the surface this harness needs.
+"""The GoodMem requests used by the benchmark.
 
-The harness talks to the REST API rather than the generated SDK so the request
-bodies it sends are visible in one place and can be quoted in a write-up. The
-retrieve endpoint answers with a server-sent event stream whose ``data`` frames
-are ``RetrieveMemoryEvent`` messages in JSON form.
+Model calls use the provider proxy; retrieval uses a server-sent event stream.
+The stream contains both results and status messages. A successful HTTP response
+therefore needs a second check: did the requested result set arrive in full?
+
+Request pacing is shared across threads. Provider throttles found inside a
+stream enter the same retry loop as HTTP throttles.
 """
 
 from __future__ import annotations
@@ -20,14 +22,13 @@ from .ratelimit import RateLimiter
 
 CHAT_POST_PROCESSOR = "com.goodmem.retrieval.postprocess.ChatPostProcessorFactory"
 
-# The server rate-limits per principal and answers 429 with a Retry-After hint.
-# Benchmark runs push thousands of requests through, so backing off correctly is
-# load-bearing rather than defensive.
+# HTTP 429 responses carry a Retry-After hint. Transient server failures use
+# the same retry loop with an exponential backoff.
 _RETRY_STATUS = frozenset({429, 502, 503, 504})
 
-# Any of these means the result set we were handed is not the result set we
-# asked for. Treating a partial or timed-out search as a normal answer is how a
-# benchmark ends up reporting a confident, wrong number, so they all abort.
+# These statuses mean retrieval was incomplete or degraded. The caller needs
+# an error here, since grading partial evidence would confound retrieval with
+# a service failure.
 _FATAL_RETRIEVAL_STATUS = frozenset({
     "EMBEDDER_FAILED",
     "EMBEDDER_UNAVAILABLE",
@@ -57,9 +58,8 @@ _BENIGN_RETRIEVAL_STATUS = frozenset({"FEATURE_DISABLED", "LLM_CAPABILITY_INFERR
 _MAX_ATTEMPTS = 10
 _BASE_BACKOFF_SECONDS = 0.5
 _MAX_BACKOFF_SECONDS = 30.0
-# The development instance sustains roughly six requests a second before it
-# starts answering 429. Pacing under that is what makes a thousands-of-requests
-# run finish; retries alone just rediscover the ceiling on every call.
+# Stay below the development instance's observed limit of about six requests
+# per second. Configuration can override these defaults for another instance.
 _DEFAULT_REQUESTS_PER_SECOND = 5.0
 # Proxied LLM calls are served by the upstream provider rather than by GoodMem's
 # own query path, so they get their own, looser budget.
@@ -69,16 +69,15 @@ _T = TypeVar("_T")
 
 
 class GoodMemError(RuntimeError):
-    """Raised when the server answers with a non-success status."""
+    """A request failed or returned data the benchmark cannot use."""
 
 
 @dataclass(frozen=True, slots=True)
 class Completion:
-    """One chat completion, with the stop reason kept.
+    """A model response with its stop reason and token usage.
 
-    ``finish_reason`` matters: a response truncated at the token cap still
-    arrives as a success, and for a chain-of-thought reader that silently drops
-    the final answer the grader is supposed to read.
+    The stop reason distinguishes a finished answer from one cut off at the
+    token limit, even when both requests succeeded.
     """
 
     text: str
@@ -171,9 +170,8 @@ class GoodMemClient:
                 if attempt == self._max_attempts - 1:
                     break
                 delay = _backoff_seconds(attempt, throttled.retry_after)
-                # Stand the whole pool down, not just this worker: the budget is
-                # shared, so letting the others keep firing guarantees the retry
-                # arrives into an empty bucket again.
+                # Delay new reservations on the shared schedule, then wait
+                # before this worker retries.
                 bucket.pause(delay)
                 time.sleep(delay)
         assert last is not None
@@ -229,13 +227,9 @@ class GoodMemClient:
         return self._request("POST", "/v1/spaces", json=body)
 
     def list_spaces(self) -> list[dict[str, Any]]:
-        """Lists every space, following pagination.
+        """List every space, following pagination.
 
-        The first page is 50, and dropping the rest is not a cosmetic bug: the
-        caller uses this to decide whether a space already exists, so a space on
-        page two reads as absent and the create that follows fails with 409.
-        That stayed hidden while a run made 14 spaces and surfaced the moment it
-        made 130.
+        Callers use this list to find existing spaces before creating new ones.
         """
         out: list[dict[str, Any]] = []
         params: dict[str, Any] = {"pageSize": 500}
@@ -290,12 +284,11 @@ class GoodMemClient:
         return len(self.list_memories(space_id, status=status))
 
     def memory_status(self, memory_id: str) -> str:
-        """Returns one memory's processing status.
+        """Read one memory's processing status.
 
-        Readiness has to be checked per memory rather than by listing the
-        space: a list is O(store size), so polling it while streaming a
-        1,710-message conversation makes the measurement quadratic in the thing
-        being measured.
+        Polling by id keeps each readiness check independent of the store's size.
+        Listing the whole store after every addition would make the BEAM timing
+        include an increasingly expensive scan.
         """
         record = self._request("GET", f"/v1/memories/{memory_id}") or {}
         return str(record.get("processingStatus") or "")
@@ -305,20 +298,12 @@ class GoodMemClient:
         self._request("DELETE", f"/v1/memories/{memory_id}")
 
     def describe_model(self, kind: str, model_id: str) -> dict[str, str]:
-        """Resolves a registration UUID to its provider and model identifier.
+        """Resolve an embedder, reranker or LLM registration to a model description.
 
-        A bare UUID in a published result tells a reader nothing and is specific
-        to one instance; the model name is what makes the run reproducible
-        elsewhere.
-
-        Args:
-          kind: One of ``embedders``, ``rerankers`` or ``llms``.
-          model_id: The registration UUID.
-
-        Returns:
-          Provider, model identifier and display name; empty strings if the
-          registration cannot be read, since a summary should not fail over a
-          missing label.
+        ``kind`` is the corresponding API collection name: ``embedders``,
+        ``rerankers`` or ``llms``. The returned provider and model name identify the
+        configuration across instances, where registration UUIDs differ. If the
+        lookup fails, return empty labels so reporting can still finish.
         """
         if not model_id:
             return {"provider": "", "model": "", "display_name": ""}
@@ -343,28 +328,15 @@ class GoodMemClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> Completion:
-        """Runs a chat completion through GoodMem's provider proxy.
+        """Request a completion through a registered model's provider proxy.
 
-        The proxy forwards to the registered upstream endpoint and injects the
-        stored credential, so the benchmark can hold the reader and judge
-        prompts byte-identical to the paper's without the provider key ever
-        reaching this process.
+        The proxy adds the stored credential and forwards the OpenAI-format
+        messages. Return the text with its stop reason and token counts.
 
-        Args:
-          llm_id: UUID of the registered LLM to route through.
-          messages: Chat messages in OpenAI format.
-          model: Model identifier to request.
-          temperature: Sampling temperature, when the model accepts one.
-          max_tokens: Completion token cap.
-
-        Returns:
-          The completion text together with its stop reason and token counts.
-
-        Raises:
-          GoodMemError: If the proxy or the provider rejects the call, or the
-            response carries no content. Empty content is a failure rather than
-            an empty answer, because an empty answer would simply be graded
-            wrong and disappear into the score.
+        ``llm_id`` selects the registration; ``model`` selects the upstream model.
+        Omit ``temperature`` for models that do not accept it. ``max_tokens`` caps
+        the completion length. A rejected request or empty response raises
+        GoodMemError.
         """
         body: dict[str, Any] = {"model": model, "messages": messages}
         if temperature is not None:
@@ -481,13 +453,10 @@ class GoodMemClient:
         ef_search: int | None = None,
         iterative_scan: str | None = None,
     ) -> list[RetrievedChunk]:
-        """Returns the dense candidate set with no reranking stage.
+        """Return dense candidates for a reranker running outside GoodMem.
 
-        Used when the reranker runs outside GoodMem, which is how the paper's own
-        Qwen3-Reranker-4B has to be driven: it is generative and must be prompted
-        with a yes/no relevance template, which no scoring endpoint here applies.
-        The measured pipeline is unchanged either way -- GoodMem supplies the
-        index and the dense retrieval, and the reranker sits on top of it.
+        The candidates retain their parent memory's metadata so the chosen chunks
+        can later be resolved to conversation turns.
         """
         body: dict[str, Any] = {
             "message": message,
@@ -556,17 +525,11 @@ class GoodMemClient:
         )
 
     def _collect_retrieval_once(self, body: dict[str, Any]) -> list[RetrievedChunk]:
-        """Streams one retrieve response and assembles the reranked result set.
+        """Read a retrieval stream and assemble its reranked chunks.
 
-        The server frames each result set as BEGIN, items, END and states how
-        many items to expect. Those are checked rather than trusted: a stream cut
-        short mid-flight would otherwise return a shorter, perfectly plausible
-        result set and quietly depress coverage.
-
-        Raises:
-          GoodMemError: If the stream reports a degraded search, is malformed,
-            ends before its END boundary, or delivers a different number of
-            reranked items than it promised.
+        Track each result set from BEGIN to END and check its advertised item
+        count. Raise GoodMemError for an incomplete or malformed stream, or for a
+        status reporting degraded retrieval.
         """
         memories: list[dict[str, Any]] = []
         chunks: list[RetrievedChunk] = []
@@ -637,11 +600,10 @@ class GoodMemClient:
 
 
 def _is_throttle(message: str) -> bool:
-    """Says whether a degraded-status message describes a provider throttle.
+    """Recognize a provider throttle in a stream status message.
 
-    Matched on the message because the stream carries no structured upstream
-    status. Deliberately narrow: a rerank that failed for any other reason stays
-    fatal, since retrying it would just spend the budget rediscovering it.
+    The stream has no structured upstream status code, so this matches only
+    known throttle messages. Other reranker failures remain errors.
     """
     low = message.lower()
     return (
@@ -663,17 +625,13 @@ def _check_status(status: dict[str, Any]) -> None:
         return
     message = str(status.get("message", ""))
     if code in _FATAL_RETRIEVAL_STATUS:
-        # A provider throttle reaches us inside the stream as a degraded status
-        # rather than as an HTTP 429, so the transport-level retry never sees
-        # it. Left fatal, it records a dead question: 248 of 500 EventQA
-        # questions scored zero on a "Reranking request failed with status 429"
-        # and dragged the published source score down by half.
+        # A provider throttle can arrive after HTTP 200, inside the stream.
+        # Convert it to the signal understood by the shared retry loop.
         if _is_throttle(message):
             raise _Throttled(429, f"{code}: {message}", None)
         raise GoodMemError(f"retrieval degraded ({code}): {message}")
-    # An unrecognised code is treated as fatal rather than ignored: a new
-    # warning the server learns to emit should stop a benchmark run, not be
-    # absorbed into a slightly lower score.
+    # An unknown status may change the meaning of the results. Require an
+    # explicit decision about it before accepting the response.
     raise GoodMemError(f"unrecognised retrieval status ({code}): {message}")
 
 
@@ -733,14 +691,10 @@ def _backoff_seconds(attempt: int, retry_after: float | None) -> float:
 
 
 def _iter_sse_data(lines: Iterator[str]) -> Iterator[dict[str, Any]]:
-    """Yields decoded ``data:`` payloads from a server-sent event stream.
+    """Decode the JSON payload of each SSE data frame.
 
-    A frame that will not decode is raised rather than skipped. Skipping one
-    loses a retrieved item and lowers coverage by an amount nothing in the
-    output would explain.
-
-    Raises:
-      GoodMemError: If a data frame is not valid JSON.
+    Malformed JSON raises GoodMemError. Skipping a bad frame could discard a
+    retrieved item while leaving the rest of the response apparently valid.
     """
     for line in lines:
         if not line.startswith("data:"):

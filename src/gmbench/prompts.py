@@ -1,10 +1,8 @@
-"""Reader and judge prompts, reproduced from the RAW-RAG paper.
+"""Prompt templates used by the benchmark readers and judges.
 
-The templates below are the ones in appendices G.3 and G.4 of arXiv:2610.30755v1
-("Is Complex Agentic Memory Always Needed? Naive RAG Is Stronger Than We
-Thought"). They are kept verbatim on purpose: holding the reader and the judge
-fixed is what makes a score comparable to the paper's, so that any difference
-is attributable to retrieval rather than to prompting.
+The LoCoMo templates follow appendices G.3 and G.4 of arXiv:2610.30755v1.
+MemoryAgentBench uses source-specific templates below. These strings are
+experimental inputs: editing their wording changes the benchmark protocol.
 """
 
 from __future__ import annotations
@@ -109,12 +107,9 @@ First, provide a short (one sentence) explanation of your reasoning, then finish
 Just return the label CORRECT or WRONG in a json format with the key as "label"."""
 
 
-# MemoryAgentBench, appendix G.7. The reader takes the retrieved memories as a
-# system message and the source-specific task template as the user message. The
-# fact-consolidation template is reproduced verbatim, including its illustrative
-# answer, which is part of the original synthetic-knowledge instruction and
-# matters: it is what tells the reader to answer from the knowledge pool rather
-# than from the world.
+# MemoryAgentBench, appendix G.7. Retrieved memories form the system message;
+# the task template forms the user message. The fact-consolidation example is
+# part of the template: its synthetic facts take precedence over world knowledge.
 MAB_READER_SYSTEM = """You are a helpful AI. Answer the question based on query and memories.
 {context}"""
 
@@ -186,10 +181,8 @@ MAB_INFBENCH_SUM_QUERY = """You are given a book above and you are tasked to sum
 
 Now summarize the book."""
 
-# InfBench summaries cannot be graded by string containment: the task is a
-# 1,000-word plot summary and the benchmark ships per-question keypoints as its
-# rubric. This asks a judge how many of those keypoints the summary actually
-# covers, which is what "summary scoring" means for this source.
+# InfBench supplies plot keypoints as a rubric. The judge counts how many the
+# generated summary covers; the runner converts that count to a fraction.
 MAB_SUMMARY_JUDGE_SYSTEM = (
     "You are an expert grader assessing whether a book summary covers the "
     "required plot points. Judge only coverage of the listed key points, not "
@@ -209,9 +202,8 @@ KEY POINTS:
 Return only a JSON object with the key "covered", whose value is the number of key points the summary covers, and the key "total", whose value is the number of key points listed. No other text."""
 
 
-# Which task template each source uses. This must cover every source in
-# memoryagentbench.GRADERS; a missing entry is caught before a run starts
-# rather than after a few hundred failed questions.
+# Every source in memoryagentbench.GRADERS needs a reader template. The runner
+# checks this mapping before ingestion.
 MAB_QUERIES: dict[str, str] = {
     "eventqa": MAB_EVENTQA_QUERY,
     "longmemeval": MAB_LONGMEMEVAL_QUERY,

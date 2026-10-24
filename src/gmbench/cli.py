@@ -1,4 +1,9 @@
-"""Command-line entry point for the GoodMem memory benchmarks."""
+"""Connect command-line stages to the benchmark pipeline.
+
+Commands share a run configuration and exchange files under its run directory.
+LoCoMo stages validate the expected question set before consuming a previous
+stage's output. BEAM and MemoryAgentBench have their own dataset adapters.
+"""
 
 from __future__ import annotations
 
@@ -167,7 +172,7 @@ def _expected_qids(cfg: config_module.RunConfig, args: argparse.Namespace) -> li
 
 
 def cmd_verify_reranker(args: argparse.Namespace, console: Console) -> int:
-    """Measures rerankers against annotated evidence, before trusting one."""
+    """Compare reranker coverage with the diagnostic's full-depth reference."""
     cfg = _load(args)
     convs = _conversations(cfg, args.conversations_limit)
     bindings = ingest.load_manifest(cfg)
@@ -193,7 +198,7 @@ def cmd_verify_reranker(args: argparse.Namespace, console: Console) -> int:
     table.add_column("Failed", justify="right")
     table.add_column("Verdict")
     table.add_row(
-        "[dim]no reranking (dense only)[/dim]", str(args.sample), f"{baseline:.1f}%", "-", ""
+        "[dim]full-depth reranker reference[/dim]", str(args.sample), f"{baseline:.1f}%", "-", ""
     )
     worst = False
     for verdict in sorted(verdicts, key=lambda v: -v.gold_at_k):
@@ -204,14 +209,13 @@ def cmd_verify_reranker(args: argparse.Namespace, console: Console) -> int:
             str(verdict.questions),
             f"{verdict.gold_at_k:.1f}%",
             str(verdict.failed) if verdict.failed else "-",
-            "[red]worse than no reranking[/red]" if below else "[green]helps[/green]",
+            "[red]below reference[/red]" if below else "[green]meets reference[/green]",
         )
     console.print(table)
     if worst:
         console.print(
-            "[red]A reranker below the dense baseline is not weak, it is inverted — "
-            "most likely a generative reranker served without its relevance "
-            "template. Do not run a scored pass on it.[/red]"
+            "[red]Evidence coverage fell below the reference on this sample. Check the "
+            "endpoint and its model template before scoring a full run.[/red]"
         )
     return 1 if worst else 0
 
@@ -237,8 +241,8 @@ def cmd_read(args: argparse.Namespace, console: Console) -> int:
     )
     if failures or truncated:
         console.print(
-            "[yellow]Re-run `read` to retry the failures; it resumes from what is "
-            "already on disk.[/yellow]"
+            "[yellow]Inspect the affected answers. To regenerate this reader's "
+            "answers, repeat the command with --no-resume before `read`.[/yellow]"
         )
     return 0
 
@@ -260,11 +264,9 @@ def _emit(
     judgements: list[judge.JudgeRecord],
     answers: list[reader.AnswerRecord],
 ) -> int:
-    """Writes the run summary and prints integrity before scores.
+    """Write the summary, then display integrity checks and accuracy.
 
-    Returns:
-      0 when the run is clean, 1 when any scored zero came from plumbing. A
-      non-zero exit keeps a contaminated run from passing a CI gate quietly.
+    Return 0 for a clean run and 1 if any integrity check fails.
     """
     expected = _expected_qids(cfg, args)
     records = retrieve.load_records(cfg, expected)
@@ -331,8 +333,8 @@ def cmd_drift(args: argparse.Namespace, console: Console) -> int:
     for qid in report.changed[:5]:
         console.print(f"  changed: {qid}")
     console.print(
-        "[yellow]Answers on disk were generated from the previous contexts. "
-        "Re-run `read --no-resume` before judging.[/yellow]"
+        "[yellow]Regenerate answers for the changed contexts before judging. "
+        "To repeat the reader stage, put --no-resume before `read`.[/yellow]"
     )
     return 1
 
@@ -482,24 +484,22 @@ def cmd_mab(args: argparse.Namespace, console: Console) -> int:
     table.add_row(*overall, style="bold cyan")
     console.print(table)
     console.print(
-        f"[dim]Overall is the mean of the source scores, per the paper's appendix "
-        f"D.5. Weighted by question it would be "
+        f"[dim]Overall uses the capability weighting in appendix D.5. "
+        f"A mean over individual questions would be "
         f"{document['accuracy_question_weighted']:.2f}.[/dim]"
     )
     if attributable:
         console.print(
-        "[dim]Single gold fact: the share of questions where one fact both names "
-        "the question's entity and states the answer — near-total for single-hop, "
-        "near-zero for multi-hop, where the answer-bearing fact names the bridging "
-        "entity instead. ...and retrieved: of those, how often that fact reached "
-        "the reader.[/dim]"
+        "[dim]Single gold fact: questions with one fact naming both the entity "
+        "and its answer. ...and retrieved: the share of those questions where "
+        "that fact reached the reader.[/dim]"
         )
     console.print(f"[dim]Summary written to {path}[/dim]")
     return 1 if document["errors"] else 0
 
 
 def cmd_table(args: argparse.Namespace, console: Console) -> int:
-    """Prints the README's results tables, generated from the summary files."""
+    """Generate a Markdown results document from saved run summaries."""
     cfg = _load(args)
     labelled: dict[str, Path] = {}
     for item in args.runs or [f"{cfg.run_tag}={cfg.run_tag}"]:
@@ -540,7 +540,7 @@ def cmd_run(args: argparse.Namespace, console: Console) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gmbench",
-        description="Run GoodMem against long-conversation memory benchmarks (LoCoMo).",
+        description="Evaluate GoodMem on LoCoMo, MemoryAgentBench and BEAM.",
     )
     parser.add_argument(
         "--config", type=Path, default=_DEFAULT_CONFIG, help="Path to the run TOML."
@@ -567,12 +567,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use only the first N questions per conversation (smoke runs).",
     )
     parser.add_argument(
-        "--force", action="store_true", help="Re-ingest even if a space looks populated."
+        "--force", action="store_true",
+        help="Compatibility flag; ingestion always checks for missing turns.",
     )
     parser.add_argument(
         "--no-resume",
         action="store_true",
-        help="Discard any existing answers or judgements and redo the stage.",
+        help="Repeat the stage, replacing its saved answers, judgements or outcomes.",
     )
 
     sub = parser.add_subparsers(dest="command", required=True)
@@ -586,13 +587,13 @@ def build_parser() -> argparse.ArgumentParser:
         ("read", cmd_read, "Generate answers from saved retrievals."),
         ("judge", cmd_judge, "Grade saved answers and report accuracy."),
         ("report", cmd_report, "Print coverage and accuracy for a run."),
-        ("export", cmd_export, "Write the committable artifact set for a run."),
+        ("export", cmd_export, "Prepare run evidence for publication."),
         ("drift", cmd_drift, "Check current contexts against a prior export's digests."),
         ("beam", cmd_beam, "Measure sequential ingestion cost on the BEAM 1M conversation."),
         ("mab-inspect", cmd_mab_inspect, "Report the MemoryAgentBench question selection."),
         ("mab", cmd_mab, "Ingest and score one MemoryAgentBench capability group."),
-        ("table", cmd_table, "Print the README results tables from run summaries."),
-        ("run", cmd_run, "Ingest, retrieve, read and judge in one go."),
+        ("table", cmd_table, "Generate Markdown results tables from run summaries."),
+        ("run", cmd_run, "Run the LoCoMo pipeline from ingestion through grading."),
     ):
         child = sub.add_parser(name, help=help_text)
         child.set_defaults(handler=handler)

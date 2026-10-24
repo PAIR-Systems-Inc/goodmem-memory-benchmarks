@@ -1,14 +1,11 @@
-# LoCoMo run configuration.
-#
-# Target to beat (paper table 10, RAW-RAG with text-embedding-3-small +
-# Cohere Rerank-v3.5): 89.07 overall with gpt-4o-mini, 93.70 with gpt-4.1-mini.
-# Best agentic system in that table: 88.12 and 91.69 respectively.
+# LoCoMo with a top-30 context, as used by the Voyage runs.
+# Model registrations come from the environment; see .env.example.
 
 [run]
 run_tag = "voyage4l-rerank25"
 dataset_path = "data/locomo10.json"
 results_dir = "results"
-# Empty uses all ten conversations. Categories exclude 5 (adversarial), leaving 1,540 questions.
+# An empty list selects all ten conversations. Category 5 is excluded.
 conversations = []
 categories = [1, 2, 3, 4]
 reader_concurrency = 50
@@ -17,57 +14,39 @@ reader_concurrency = 50
 base_url = "https://localhost:8080"
 tls_verify = false
 timeout_seconds = 300.0
-# The instance starts answering 429 above roughly six requests a second. Pacing
-# under that is what lets a 1,540-question pass finish; the client also honours
-# Retry-After and stands the whole worker pool down when it is throttled.
+# Stay below the development instance's observed limit of about six requests/s.
+# Throttling delays further requests through the shared limiter.
 requests_per_second = 5.0
-# Proxied reader and judge calls are served upstream, not by GoodMem's query
-# path, so they get a looser budget than retrieval.
+# Proxied model calls have a separate allowance because they run upstream.
 llm_requests_per_second = 15.0
 
 [models]
-# Registration UUIDs are per-instance, so they come from the environment:
-# GMBENCH_EMBEDDER_ID, GMBENCH_RERANKER_ID, GMBENCH_JUDGE_LLM_ID and
-# GMBENCH_READER_LLM_IDS. The run that produced the published numbers used
-# Voyage 4 Large (1024d) with voyage-rerank-2.5.
+# The published Voyage runs use voyage-4-large (1024 dimensions) with
+# rerank-2.5 or rerank-3. Set their registration UUIDs in the environment.
 embedder_id = ""
 reranker_id = ""
-# The paper runs every system through the same reader, so these are pinned to
-# appendix A.1.1: GPT-4o-mini and GPT-4.1-mini readers, GPT-4o-mini-2024-07-18
-# as judge at temperature zero with three judgements per answer.
+# Keep reader and judge settings fixed when comparing retrieval configurations.
 reader_model = "gpt-4o-mini"
 judge_model = "gpt-4o-mini-2024-07-18"
 reader_max_tokens = 4096
 judge_repetitions = 3
-
-# Reader and judge go through GoodMem's provider proxy, so the provider key
-# stays in the instance rather than in this process.
 judge_llm_id = ""
 
-# Populated from GMBENCH_READER_LLM_IDS in the form
-# "gpt-4o-mini=<uuid>,gpt-4.1-mini=<uuid>".
+# GMBENCH_READER_LLM_IDS accepts "gpt-4o-mini=<uuid>,gpt-4.1-mini=<uuid>".
 [models.reader_llm_ids]
 
 [chunking]
-# Character counts, which is what GoodMem's splitter actually measures. One
-# memory per turn means this window leaves nearly every turn as a single chunk.
+# Character counts. Most turns fit in one chunk; longer turns may be split.
 chunk_size = 1500
 chunk_overlap = 150
 separators = ["\n\n", "\n", ". ", " ", ""]
 
 [retrieval]
-# Dense depth then rerank depth. The paper's shape is 128 -> 15; a sweep over
-# (final_k, neighbor_turns) picked 30 -> ±2 as the best coverage available at
-# the paper's own evidence budget (~4.9k tokens against its ~4.8k LoCoMo mean).
-# Its own ablation finds final_k flat from 15 to 60, so this is not a thumb on
-# the scale -- it is spending the same budget on more selections rather than on
-# wider expansion around fewer.
+# Rerank the dense candidates, then expand each selected turn by two neighbors
+# on either side. This setup supplies roughly 4,800 evidence tokens per question.
 dense_candidates = 128
 final_k = 30
-# Turns kept either side of each selected turn.
 neighbor_turns = 2
-# Sweeping 400 against 800 moved coverage by 0.00 points, so HNSW recall is not
-# a binding constraint here and the cheaper setting stands.
 ef_search = 400
 iterative_scan = "ITERATIVE_SCAN_RELAXED_ORDER"
 concurrency = 8
@@ -77,8 +56,7 @@ batch_size = 64
 space_concurrency = 2
 ready_poll_seconds = 3.0
 ready_timeout_seconds = 3600.0
-# One memory per turn is one embedding request per turn, so the provider's RPM
-# ceiling bounds ingest, not GoodMem. voyage-4-large allows 2,000/min; this
-# paces submission under that. Failures are re-driven by the repair rounds.
+# Pace memory submissions for the embedding provider. Failed embeddings are
+# retried in repair passes; completed memories are kept.
 embed_requests_per_minute = 1500
 repair_rounds = 4

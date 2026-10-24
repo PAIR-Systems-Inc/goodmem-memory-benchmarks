@@ -1,10 +1,9 @@
-"""Run summaries: the durable, committable record of a result.
+"""Describe a scored run in a compact JSON summary.
 
-The per-question shards are large and gitignored, so a finished run needs a
-small artifact that states what was measured, under what configuration, how
-complete it was, and with what uncertainty. Quoting a point estimate against a
-published point estimate is itself a way to be quietly wrong, so the interval
-travels with the number.
+Judgements are averaged within each question before questions are averaged into
+category scores. Bootstrap intervals resample those question means. Alongside
+the scores, the summary records model configuration and integrity counts so a
+reader can assess what the numbers represent.
 """
 
 from __future__ import annotations
@@ -37,7 +36,7 @@ class Score:
 
 @dataclass(frozen=True, slots=True)
 class Integrity:
-    """Whether anything in the run was a failure rather than a measurement."""
+    """Counts of failed calls, incomplete answers and unusable judgements."""
 
     questions: int
     reader_errors: int
@@ -50,7 +49,7 @@ class Integrity:
 
     @property
     def clean(self) -> bool:
-        """True when every scored zero came from the judge, not from plumbing."""
+        """Whether all judgements are present, with no call failures or truncated answers."""
         return (
             self.reader_errors == 0
             and self.reader_truncated == 0
@@ -60,7 +59,7 @@ class Integrity:
         )
 
     def problems(self) -> list[str]:
-        """Returns one line per contamination source, empty when clean."""
+        """Describe each nonzero integrity count."""
         out: list[str] = []
         if self.reader_errors:
             out.append(f"{self.reader_errors} reader calls failed")
@@ -99,6 +98,9 @@ def bootstrap_ci(
     """
     if not means:
         return (0.0, 0.0)
+    # The sampling unit is a question, whose repeated judgements have
+    # already been averaged. Resampling individual judgements would give
+    # repeated evaluations of the same question independent weight.
     rng = random.Random(seed)
     n = len(means)
     draws = sorted(100.0 * sum(rng.choices(means, k=n)) / n for _ in range(resamples))
@@ -132,7 +134,7 @@ def scores(judgements: list[JudgeRecord]) -> list[Score]:
 def integrity(
     answers: list[AnswerRecord], judgements: list[JudgeRecord], repetitions: int
 ) -> Integrity:
-    """Counts every way this run could be a failure rather than a measurement."""
+    """Count the reader and judge problems checked by this harness."""
     return Integrity(
         questions=len(answers),
         reader_errors=sum(1 for answer in answers if answer.failed),
@@ -207,7 +209,7 @@ def summary_path(config: RunConfig) -> Path:
 
 
 def write(config: RunConfig, document: dict[str, object]) -> Path:
-    """Writes the summary document and returns where it landed."""
+    """Write the summary document and return its path."""
     path = summary_path(config)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(document, indent=2) + "\n")

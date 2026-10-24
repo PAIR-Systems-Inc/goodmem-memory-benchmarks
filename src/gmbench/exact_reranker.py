@@ -1,26 +1,12 @@
-"""Driving the paper's own reranker, which no endpoint here serves correctly.
+"""Exchange candidate sets and scores with an external reranker.
 
-The paper's table 11 uses ``Qwen/Qwen3-Reranker-4B``. That model is generative:
-it emits no similarity score. It is prompted with a yes/no relevance question
-and the score is the probability it puts on "yes" at the next position. An
-endpoint that serves the weights behind a generic scoring API without that
-template returns numbers that are not relevance -- the instance's vLLM
-deployment ranks an obviously relevant passage 81st of 128, with every score
-squeezed into a 0.26-wide band, and puts gold evidence in the top-15 16.7% of
-the time against 83.3% for no reranking at all.
+GoodMem first writes its dense candidates. A separate process scores them, and
+this module checks that every question has one score per candidate before
+selecting the highest-ranked turns. Keeping that boundary in files lets the GPU
+scorer use its own environment.
 
-So the reranker is driven directly, in three phases, which also keeps a GPU
-dependency out of this package:
-
-1. ``retrieve --dense-only`` asks GoodMem for the dense candidate set and writes
-   it here.
-2. ``tools/qwen3_reranker.py`` scores those pairs with the checkpoint, applying
-   the documented chat template and the paper's appendix G.1 instruction.
-3. ``retrieve --from-scores`` assembles reader contexts from the scores.
-
-This changes nothing about what is measured. The paper's pipeline is index,
-dense retrieve, rerank, read; GoodMem supplies the index and the dense retrieval
-whether the reranker sits inside its post-processor or beside it.
+The supplied scorer uses Qwen3-Reranker-4B from the paper's table 11. It asks a
+yes/no relevance question and normalizes the logits for those two answers.
 """
 
 from __future__ import annotations
@@ -91,11 +77,10 @@ EXTERNAL_RERANKER = {
 
 
 def write_provenance(run_dir: Path, scorer: dict[str, Any] | None = None) -> Path:
-    """Records which reranker produced this run's ranking.
+    """Record the external scorer used to produce the ranking.
 
-    Without this the summary describes the reranker named in the config, which
-    for an externally reranked run is a model that was never called -- a false
-    provenance record in the one file a reader checks.
+    Reporting reads this file in preference to the hosted reranker in the run
+    configuration, which is unused when contexts are assembled from scores.
     """
     path = provenance_path(run_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -128,20 +113,11 @@ def read_candidates(path: Path) -> list[Candidates]:
 
 
 def read_scores(path: Path, expected: list[Candidates]) -> dict[str, list[float]]:
-    """Reads external rerank scores and checks they line up with the candidates.
+    """Load one score per candidate, grouped by question id.
 
-    Args:
-      path: JSONL of ``{qid, scores}``.
-      expected: The candidate sets the scores should cover.
-
-    Returns:
-      Question id to one score per candidate, in candidate order.
-
-    Raises:
-      GoodMemError: If a question is missing, unexpected, or its score count
-        does not match its candidate count. A silent mismatch would rerank each
-        question against another question's scores, which produces a plausible
-        and entirely meaningless result.
+    The JSONL rows contain ``qid`` and ``scores``. Scores must follow the same
+    order as the corresponding candidate documents. Missing or extra questions,
+    or a score count that differs from the candidate count, raise GoodMemError.
     """
     if not path.exists():
         raise GoodMemError(f"no rerank scores at {path}; run tools/qwen3_reranker.py")

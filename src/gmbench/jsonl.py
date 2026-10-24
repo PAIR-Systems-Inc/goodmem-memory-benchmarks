@@ -1,13 +1,9 @@
-"""Append-only JSONL shards that make a stage resumable.
+"""Save completed work one JSONL row at a time.
 
-Reader and judge passes are thousands of billed provider calls. Holding them in
-memory and writing once at the end means a crash, an OOM or a Ctrl-C discards
-all of it, and Ctrl-C is the worst case: ``ThreadPoolExecutor`` shuts down with
-``wait=True``, so the interrupt blocks until every in-flight call drains and
-then throws the results away.
-
-So each row is flushed as it lands, and a restart reads back what is already
-there and only does the remainder.
+The writer flushes each row under a lock so concurrent model calls can share a
+file. On restart, a stage reads the saved question ids and submits the remaining
+work. The reader tolerates an incomplete final row from an interrupted write,
+but reports malformed JSON anywhere earlier in the file.
 """
 
 from __future__ import annotations

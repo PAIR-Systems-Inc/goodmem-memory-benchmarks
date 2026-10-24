@@ -1,20 +1,12 @@
-"""BEAM: sequential ingestion cost over a conversation approaching one million tokens.
+"""Measure how ingestion time changes as a BEAM conversation grows.
 
-This is not an accuracy benchmark. The paper streams one ordered 1,710-message
-conversation into each memory system a message at a time, waiting for each Add
-to be ready before the next begins, and plots cumulative ingest time against
-context length. That isolates what a memory system costs to fill, which is where
-systems that run an LLM over every message diverge sharply from ones that do not.
+The default run adds one message, waits for it to become searchable, then adds
+the next. GoodMem accepts a memory before embedding finishes, so timing ends
+only when its status reaches COMPLETED. Each tick records that elapsed time
+alongside the accumulated conversation length.
 
-Two things make a number here honest, and both are easy to get wrong:
-
-- **Readiness, not acceptance.** GoodMem's create returns once the memory is
-  persisted, with embedding still queued. Timing that would measure the API, not
-  the system, so each Add is followed by a poll until the memory reports
-  COMPLETED. The paper does the same, calling it "Add-to-ready".
-- **One message at a time.** Outer concurrency is one by construction: no
-  batching, no overlap. A pipelined ingest would be a different, better number
-  measuring something the paper did not measure.
+Keeping one message in flight measures the latency of sequential ingestion.
+Batch throughput is a separate measurement.
 """
 
 from __future__ import annotations
@@ -64,14 +56,10 @@ class Conversation:
 
     @property
     def approximate_tokens(self) -> int:
-        """A rough token count, four characters per token.
+        """Estimate context length at four characters per token.
 
-        Deliberately rough: the point of this benchmark is elapsed time against
-        context length, and the paper's own x-axis is approximate. For the
-        paper's conversation this estimate gives about 1.06M against a real
-        o200k tokenizer count of 970,963 -- a 9% overshoot, because the corpus
-        is heavy with code and markdown. Close enough to label an axis, not
-        close enough to quote as a measurement.
+        For the reference conversation this gives about 1.06M tokens; an o200k
+        tokenizer counts 970,963. Use the estimate to label the time curve.
         """
         return sum(len(message.content) for message in self.messages) // 4
 
@@ -144,20 +132,10 @@ class Tick:
 def _wait_ready(
     client: GoodMemClient, memory_id: str, timeout_seconds: float
 ) -> float:
-    """Blocks until one memory reports COMPLETED.
+    """Wait for a memory to reach COMPLETED and return the elapsed seconds.
 
-    Args:
-      client: Connected GoodMem client.
-      memory_id: The memory just created.
-      timeout_seconds: How long to wait before giving up.
-
-    Returns:
-      Seconds spent waiting.
-
-    Raises:
-      GoodMemError: On timeout, or if the memory failed to embed. A failure is
-        fatal rather than skipped: ingestion cost measured against a store that
-        is quietly missing messages is not the quantity being reported.
+    Raise GoodMemError on timeout or embedding failure. A failed message cannot
+    contribute a successful ingestion time.
     """
     started = time.monotonic()
     deadline = started + timeout_seconds
@@ -184,20 +162,11 @@ def measure(
     limit: int | None = None,
     poll_every: int = 1,
 ) -> Iterator[Tick]:
-    """Streams the conversation one message at a time, yielding cumulative cost.
+    """Ingest messages in order, yielding cumulative time at each readiness check.
 
-    Args:
-      client: Connected GoodMem client.
-      config: Active run configuration.
-      conversation: The conversation to stream.
-      space_id: An empty space to ingest into.
-      limit: Stop after this many messages, for a short run.
-      poll_every: Check readiness every N messages instead of every one. One
-        matches the paper; a larger value trades fidelity for wall-clock when
-        only the shape of the curve is wanted.
-
-    Yields:
-      One tick per readiness check.
+    The supplied space must be empty. ``limit`` caps the message count for a
+    short run. Keep ``poll_every=1`` for the paper's protocol; larger values
+    wait only for every Nth memory and the final memory.
     """
     limiter = RateLimiter.per_minute(config.ingest.embed_requests_per_minute)
     messages = conversation.messages[:limit] if limit else conversation.messages
@@ -256,7 +225,7 @@ def summary_path(config: RunConfig) -> Path:
 
 
 def write_summary(config: RunConfig, conversation: Conversation, ticks: list[Tick]) -> Path:
-    """Writes the ingestion-cost summary and returns where it landed."""
+    """Write the ingestion summary and return its path."""
     final = ticks[-1] if ticks else None
     document: dict[str, Any] = {
         "benchmark": "beam-1m",

@@ -1,9 +1,8 @@
-# Benchmark inputs and outputs are large and/or licensed separately.
+# Downloaded datasets stay local; keep only their setup guide in Git.
 data/*
 !data/.gitkeep
 !data/README.md
-# Per-question shards are large and regenerable; the export directory holds the
-# small, committable evidence for a published run.
+# Keep run exports in Git and leave full working files local.
 results/*
 !results/.gitkeep
 !results/*/
@@ -15,6 +14,7 @@ results/_archive/
 __pycache__/
 *.py[cod]
 .venv/
+.reranker-venv/
 .ruff_cache/
 .pytest_cache/
 docs/*.pdf

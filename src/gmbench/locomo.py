@@ -18,21 +18,16 @@ from pathlib import Path
 _SESSION_RE = re.compile(r"^session_(\d+)$")
 _DATE_FORMAT = "%I:%M %p on %d %B, %Y"
 
-# The composition of the 10-conversation release, by category. The paper
-# evaluates the four non-adversarial categories, which come to 1,540 questions;
-# category 5 is adversarial and excluded there. A file that does not match is a
-# different release, and a score measured on it would not be comparable.
+# Expected counts identify the release used in the comparison. Categories 1–4
+# contain the 1,540 evaluated questions; category 5 is excluded.
 EXPECTED_CONVERSATIONS = 10
 EXPECTED_CATEGORY_COUNTS: dict[int, int] = {1: 282, 2: 321, 3: 96, 4: 841, 5: 446}
 EVALUATED_CATEGORIES: tuple[int, ...] = (1, 2, 3, 4)
 
 # A dialogue reference as the dataset defines it: session and turn.
 _DIA_ID_RE = re.compile(r"^D\d+:\d+$")
-# Six non-adversarial questions in the 10-conversation release pack several
-# references into one string, separated by spaces or semicolons, and two carry
-# references that are not recoverable at all ("D", "D:11:26"). Splitting the
-# first kind is safe; the second kind is recorded rather than guessed at, since
-# inventing a reference would silently change what coverage measures.
+# An annotation may pack several ids into one string. Split at separators,
+# but preserve malformed references such as "D:11:26" for reporting.
 _DIA_ID_SPLIT_RE = re.compile(r"[;,\s]+")
 
 CATEGORY_NAMES: dict[int, str] = {
@@ -82,22 +77,19 @@ class Question:
 
     @property
     def evidence_is_measurable(self) -> bool:
-        """True when at least one reference was recoverable.
+        """Whether at least one evidence reference has valid syntax.
 
-        A question whose entire evidence list is unparseable cannot be scored
-        for coverage. Treating it as a miss would understate retrieval for a
-        defect in the dataset rather than in the system under test.
+        Conversation.resolvable_evidence checks whether those references actually
+        exist in the source conversation.
         """
         return bool(self.evidence)
 
     @property
     def qid(self) -> str:
-        """A stable id that survives across stages and runs.
+        """A stable id based on the question's original position in the dataset.
 
-        The dataset holds a handful of duplicated question strings within a
-        conversation, and ``hash`` is salted per process, so position in the
-        conversation's question list is what makes this both unique and
-        reproducible.
+        Question text can repeat within a conversation. Using its position keeps
+        ids unique, and assigning it before filtering keeps them stable across runs.
         """
         return f"{self.conversation_id}:q{self.index:04d}:c{self.category}"
 
@@ -108,10 +100,10 @@ class Question:
 
 @dataclass(frozen=True)
 class Conversation:
-    """A full multi-session conversation plus its questions.
+    """A conversation with its ordered turns and questions.
 
-    This one is deliberately not ``slots=True``: the cached lookup tables below
-    need an instance dict, and there are only ten of these objects per run.
+    The cached lookup tables need an instance dictionary, so this dataclass
+    does not use slots.
     """
 
     conversation_id: str
@@ -129,18 +121,10 @@ class Conversation:
         return {turn.turn_index: turn for turn in self.turns}
 
     def resolvable_evidence(self, question: Question) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """Splits a question's evidence into references this conversation has.
+        """Separate evidence references into present and absent dialogue ids.
 
-        A handful of references in the released dataset point at turns that are
-        not in the conversation (three in the non-adversarial split). Scoring
-        those as retrieval misses would charge the system under test for someone
-        else's typo, so they are separated out and reported instead.
-
-        Args:
-          question: The question whose evidence to resolve.
-
-        Returns:
-          The references present in this conversation, and those absent from it.
+        Some annotations refer to turns missing from their conversation. Return
+        those separately so coverage can report them without counting a miss.
         """
         known = self.by_dia_id
         present = tuple(ref for ref in question.evidence if ref in known)
@@ -286,15 +270,11 @@ def _validate(
     filtered_conversations: bool,
     filtered_categories: frozenset[int],
 ) -> None:
-    """Checks the loaded data against the release the paper evaluates.
+    """Check turn identity, reference answers and the expected release size.
 
-    Structural invariants are always checked. The published counts are only
-    checked on a full, unfiltered load, since a smoke run deliberately takes a
-    subset.
-
-    Raises:
-      DatasetError: If the data is internally inconsistent, or is a full load
-        that does not match the published composition.
+    Every load checks for duplicate dialogue ids and empty answers. A load of
+    all conversations also checks the conversation count and the counts for
+    the requested categories. An inconsistency raises DatasetError.
     """
     for conversation in conversations:
         dia_ids = [turn.dia_id for turn in conversation.turns]
@@ -322,8 +302,8 @@ def _validate(
     for conversation in conversations:
         for question in conversation.questions:
             counts[question.category] = counts.get(question.category, 0) + 1
-    # An unknown category in the filter means a release this check cannot speak
-    # to, so it stays quiet rather than failing on its own ignorance.
+    # The reference counts cannot validate a selection containing categories
+    # outside this release.
     if filtered_categories and not filtered_categories <= set(EXPECTED_CATEGORY_COUNTS):
         return
     wanted = {

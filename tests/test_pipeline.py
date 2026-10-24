@@ -1,12 +1,15 @@
-"""Tests for the parts of the harness that decide a score.
+"""Tests for evidence selection and scoring.
 
-The grading rules and the evidence bookkeeping are where a bug would quietly
-move a published number, so those are what these cover.
+The fixtures exercise the boundaries between stages: source ids must survive
+ingestion, retrieved evidence must retain its order, and graders must apply the
+rule for each dataset. Service behavior is simulated so these checks need no
+model credentials. Tests that use downloaded datasets skip when they are absent.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -266,7 +269,7 @@ def test_ranked_dia_ids_preserves_rank_order() -> None:
 
 
 def test_ranked_dia_ids_rejects_a_chunk_with_no_dia_id() -> None:
-    """Silently dropping one would shrink the evidence with nothing to explain it."""
+    """A chunk without a dialogue id cannot be mapped to its source turn."""
     chunks = [_chunk("D1:3"), RetrievedChunk("m", "t", 0, 0.5, {})]
     with pytest.raises(GoodMemError, match="no dia_id"):
         ranked_dia_ids(chunks)
@@ -309,7 +312,7 @@ def test_rate_limiter_disabled_when_rate_is_not_positive() -> None:
 
 
 def test_rate_limiter_pause_holds_subsequent_callers() -> None:
-    """A 429 should stand the whole pool down, not just the worker that saw it."""
+    """A throttle pauses every worker sharing the request allowance."""
     import time
 
     from gmbench.ratelimit import RateLimiter
@@ -341,7 +344,7 @@ def test_completeness_accepts_an_exact_cover() -> None:
 
 
 def test_completeness_catches_a_short_file() -> None:
-    """A short shard is the dangerous case: it looks exactly like a complete one."""
+    """Valid JSON is insufficient: the file must contain every expected question."""
     from gmbench import validate
 
     report = validate.check("read", ["a", "b", "c"], ["a", "b"])
@@ -364,7 +367,7 @@ def test_completeness_catches_duplicates_and_strangers() -> None:
 
 
 def test_shard_writer_flushes_each_row(tmp_path) -> None:
-    """Rows must be on disk as they land, not at the end of the stage."""
+    """A completed row must be readable while the stage is still running."""
     from gmbench import jsonl
 
     path = tmp_path / "shard.jsonl"
@@ -409,7 +412,7 @@ def test_read_rows_rejects_corruption_that_is_not_a_torn_tail(tmp_path) -> None:
 
 
 def test_fatal_status_aborts_rather_than_degrading_the_score() -> None:
-    """A partial vector search must fail, not quietly return fewer chunks."""
+    """A partial vector search cannot be used as complete evidence."""
     from gmbench.client import _check_status
 
     with pytest.raises(GoodMemError, match="VECTOR_SEARCH_PARTIAL"):
@@ -417,7 +420,7 @@ def test_fatal_status_aborts_rather_than_degrading_the_score() -> None:
 
 
 def test_unknown_status_is_treated_as_fatal() -> None:
-    """A warning the server learns to emit should stop a run, not be absorbed."""
+    """An unrecognized status needs an explicit handling rule."""
     from gmbench.client import _check_status
 
     with pytest.raises(GoodMemError, match="unrecognised"):
@@ -438,7 +441,7 @@ def test_chunk_with_an_out_of_range_memory_index_is_rejected() -> None:
 
 
 def test_malformed_event_frame_is_rejected() -> None:
-    """Skipping a frame loses a retrieved item and lowers coverage unexplained."""
+    """Malformed frames must be reported because they may contain retrieval results."""
     from gmbench.client import _iter_sse_data
 
     with pytest.raises(GoodMemError, match="malformed event frame"):
@@ -533,7 +536,7 @@ def test_retrieve_accepts_a_complete_result_set(monkeypatch) -> None:
 
 
 def test_retrieve_rejects_a_truncated_stream(monkeypatch) -> None:
-    """A stream cut short would otherwise return a plausible, shorter result set."""
+    """Results are incomplete until their END frame arrives."""
     client = _fake_stream(
         monkeypatch, [_begin("rs-1", 2), _memory("D1:1"), _item("rs-1", 0, "D1:1")]
     )
@@ -582,7 +585,7 @@ needs_mab = pytest.mark.skipif(
 
 
 def test_base_source_strips_length_variants() -> None:
-    """22 shipped labels collapse to 14 sources; getting this wrong over-reports."""
+    """The 22 length-variant labels identify 14 underlying sources."""
     from gmbench.memoryagentbench import base_source
 
     assert base_source("eventqa_131072") == "eventqa"
@@ -661,11 +664,7 @@ def test_demonstration_units_never_split_an_example_from_its_label() -> None:
 
 
 def test_session_splitting_handles_the_flat_alternating_shape() -> None:
-    """The released context alternates stamp, turns — not a list of pairs.
-
-    Read as pairs, the timestamp string is iterated character by character and
-    the store fills with single letters: populated-looking and useless.
-    """
+    """Each timestamp in the released context is followed by its list of turns."""
     from gmbench.memoryagentbench import UNIT_SESSION, Block
 
     context = repr(
@@ -779,7 +778,7 @@ def test_substring_scoring_rejects_a_miss_and_an_empty_prediction() -> None:
 
 
 def test_question_entities_strips_the_relation_template() -> None:
-    """What distinguishes these questions is the entity, not the relation."""
+    """Template words must be removed before identifying the question entity."""
     from gmbench.mab_run import question_entities
 
     assert question_entities("Which sport is Salem-Keizer Volcanoes associated with?") == [
@@ -791,11 +790,10 @@ def test_question_entities_strips_the_relation_template() -> None:
 
 
 def test_gold_serial_requires_the_entity_not_just_the_answer() -> None:
-    """Matching the answer alone picks a fact about something else entirely.
+    """The newest fact must match both the entity and the answer.
 
-    A gold string like "basketball" occurs in dozens of facts about unrelated
-    entities, and the highest-serial one among those is almost never the fact
-    the question concerns.
+    Several entities can share an answer such as "basketball". A newer fact
+    about another entity must not be selected as this question's evidence.
     """
     from gmbench.mab_run import gold_serial_for
     from gmbench.memoryagentbench import Unit
@@ -813,11 +811,7 @@ def test_gold_serial_requires_the_entity_not_just_the_answer() -> None:
 
 
 def test_gold_serial_is_none_when_the_answer_fact_omits_the_question_entity() -> None:
-    """The multi-hop shape: the answer-bearing fact names the bridging entity.
-
-    That is a property of the task rather than a measurement failure, so the
-    caller reports it separately instead of counting it as a retrieval miss.
-    """
+    """A multi-hop answer may require a bridge, leaving no single attributable fact."""
     from gmbench.mab_run import gold_serial_for
     from gmbench.memoryagentbench import Unit
 
@@ -874,11 +868,10 @@ def _outcome(
     gold: int | None = None,
     partial: float | None = None,
 ):
-    """Builds an Outcome, keeping `partial` consistent with `correct`.
+    """Build an outcome with consistent binary and fractional scores.
 
-    Aggregation reads `partial`, because summarisation is graded by fractional
-    keypoint coverage. Every other source stores 1.0 or 0.0 there, so a helper
-    keeps the two from drifting apart in tests.
+    Aggregation reads ``partial``. For these binary fixtures it must be 1.0
+    when correct and 0.0 otherwise.
     """
     from gmbench.mab_run import Outcome
 
@@ -897,7 +890,7 @@ def _outcome(
 
 
 def test_summary_separates_a_reading_failure_from_a_retrieval_one() -> None:
-    """Accuracy alone cannot tell those apart, so attribution is tracked."""
+    """Retrieving the gold fact and answering correctly are separate observations."""
     from gmbench.mab_run import Outcome, summarize
 
     outcomes = [
@@ -934,11 +927,9 @@ def test_summary_reports_no_retrieval_rate_when_nothing_is_attributable() -> Non
 
 
 def test_capability_score_is_a_macro_average_over_sources() -> None:
-    """The paper averages source scores, not questions (appendix D.5).
+    """Sources have equal weight even when their question counts differ.
 
-    The two coincide only when sources contribute equally many questions. For
-    accurate retrieval they do not: EventQA's 500 questions would outweigh
-    RULER's 100 fivefold and change the published figure.
+    EventQA's 500 questions must not outweigh RULER's 100 in the capability mean.
     """
     from gmbench.mab_run import Outcome, summarize
 
@@ -956,12 +947,10 @@ def test_capability_score_is_a_macro_average_over_sources() -> None:
 
 
 def test_session_units_are_windowed_and_keep_their_timestamp() -> None:
-    """A whole session is too coarse to embed, and a window needs its date.
+    """Each chat window must fit the size limit and retain its session date.
 
-    Sessions here average ~14,000 characters, so one embedding standing for the
-    whole thing cannot discriminate between dozens of unrelated turns. These
-    questions are also date-sensitive, so a window cut from mid-session must
-    carry the timestamp forward or it loses its only temporal anchor.
+    The date gives temporal questions an anchor even when retrieval selects a
+    window from the middle of the session.
     """
     from gmbench.memoryagentbench import UNIT_SESSION, Block
 
@@ -989,11 +978,10 @@ def test_session_units_are_windowed_and_keep_their_timestamp() -> None:
 
 @needs_mab
 def test_dataset_question_ids_collide_across_blocks() -> None:
-    """A guard on the assumption that made the resume key wrong.
+    """Dataset question ids are unique only within a block.
 
-    The released qa_pair_ids repeat: EventQA's five blocks each number their
-    questions no0..no99 while asking 500 distinct questions. Anything keyed on
-    the dataset id alone silently loses four fifths of them.
+    EventQA reuses no0 through no99 across its five blocks. Qualifying them by
+    block must preserve all 500 questions.
     """
     from gmbench import memoryagentbench as mab
 
@@ -1058,12 +1046,7 @@ def test_recall_grading_needs_the_entity_map() -> None:
 
 
 def test_every_source_has_a_template_and_a_grader() -> None:
-    """A missing entry fails every question of that source identically.
-
-    Discovered at run time it costs a full ingest and hundreds of requests to
-    learn something knowable before the run starts, so it is asserted here and
-    preflighted in run_capability.
-    """
+    """Every supported source needs both a reader prompt and a scoring rule."""
     from gmbench.memoryagentbench import CAPABILITIES, GRADERS
     from gmbench.prompts import MAB_QUERIES
 
@@ -1072,12 +1055,9 @@ def test_every_source_has_a_template_and_a_grader() -> None:
 
 
 def test_test_time_learning_uses_the_papers_nested_formula() -> None:
-    """TTL weights ReDial equally against the mean of five in-context sources.
+    """ReDial has the same weight as the five in-context sources combined.
 
-    A flat mean over its six sources gives the in-context sources five sixths
-    of the weight instead of a half. On our measured run that reads 63.83 where
-    the specified formula reads 47.50 — against a published 47.68, so the
-    difference is the whole comparison.
+    A flat mean would give those five sources five sixths of the weight.
     """
     from gmbench.mab_run import capability_score
 
@@ -1110,12 +1090,7 @@ def test_other_capabilities_average_their_sources() -> None:
 
 @needs_mab
 def test_infbench_question_gets_all_its_keypoints() -> None:
-    """InfBench ships one question per block with 25 keypoints for it.
-
-    Taking the i-th element, as DetectiveQA needs, hands InfBench a single
-    keypoint out of 25 and grades a book summary against a twenty-fifth of its
-    rubric — which scored 2.00 before this was fixed.
-    """
+    """InfBench has one question per block, graded against all 25 keypoints."""
     from gmbench import memoryagentbench as mab
 
     blocks = mab.load(MAB_DIR)
@@ -1130,13 +1105,7 @@ def test_infbench_question_gets_all_its_keypoints() -> None:
 
 @needs_mab
 def test_resume_key_matches_the_written_key() -> None:
-    """These two uses must agree, and once did not.
-
-    Outcomes were written with a block-qualified id while resume compared the
-    raw dataset id. Nothing ever matched, so a resumed run re-ran every question
-    and appended to the existing shard, doubling both the rows and the question
-    count the summary reported. Deriving both from one function is the fix.
-    """
+    """Writing and resuming must identify a question by the same block-qualified key."""
     from gmbench import memoryagentbench as mab
     from gmbench.mab_run import outcome_id
 
@@ -1154,11 +1123,7 @@ def test_resume_key_matches_the_written_key() -> None:
 
 
 def test_summary_judge_failure_is_not_zero_coverage(monkeypatch) -> None:
-    """An outage and a summary covering nothing must not be the same number.
-
-    One is a broken measurement, the other is a result. Returning 0.0 for both
-    is how an outage gets published as a score.
-    """
+    """A failed judgement returns None; a valid judgement can return zero."""
     from gmbench import mab_run
 
     class _Broken:
@@ -1176,19 +1141,15 @@ def test_summary_judge_failure_is_not_zero_coverage(monkeypatch) -> None:
     )()
     assert mab_run.score_summary(_Broken(), cfg, "a summary", ["point one"]) is None
     assert mab_run.score_summary(_Garbled(), cfg, "a summary", ["point one"]) is None
-    # An empty summary genuinely covers nothing, and that is a zero.
+    # A valid judgement of an empty summary gives zero coverage.
     assert mab_run.score_summary(_Broken(), cfg, "   ", ["point one"]) == 0.0
 
 
-# -- the paper's own reranker, driven externally -------------------------
+# -- external reranking -------------------------------------------------
 
 
 def test_external_scores_must_line_up_with_the_candidates() -> None:
-    """A silent misalignment reranks each question against another's scores.
-
-    That produces a plausible and entirely meaningless result, so the loader
-    refuses anything but an exact cover with matching counts.
-    """
+    """Each question needs exactly one score per candidate, in candidate order."""
     from gmbench import exact_reranker as ex
     from gmbench.client import GoodMemError
 
@@ -1234,11 +1195,7 @@ def test_external_ranking_is_by_score_and_deterministic_on_ties() -> None:
 
 
 def test_collect_dense_is_callable_end_to_end(monkeypatch, tmp_path) -> None:
-    """A smoke test over the dense path, which a missing import once broke.
-
-    The failure was a NameError that only appeared at runtime because nothing
-    exercised this function.
-    """
+    """Dense retrieval must write candidate sets that the external scorer can read."""
     from gmbench import retrieve as rt
     from gmbench.client import RetrievedChunk
     from gmbench.ingest import SpaceBinding
@@ -1282,16 +1239,9 @@ def test_collect_dense_is_callable_end_to_end(monkeypatch, tmp_path) -> None:
 
 @needs_mab
 def test_every_block_gets_its_own_space_name() -> None:
-    """Two blocks must never share a space name.
+    """Blocks sharing a source label still need separate document stores.
 
-    A source ships many rows, each a self-contained document store, and several
-    rows share one label. Naming the space after the label collided them, so a
-    row was answered against whichever row had last been ingested -- and the
-    reuse check passed, because a space holding another block's documents is
-    full, COMPLETED and indistinguishable from a correct one. It cost 607 of
-    2,071 questions, concentrated entirely in the multi-row sources, and it is
-    invisible in the output: the reader simply says the context does not
-    mention the answer.
+    The space name must distinguish both the block and the run.
     """
     from gmbench import memoryagentbench as mab
     from gmbench.mab_run import space_name
@@ -1305,11 +1255,7 @@ def test_every_block_gets_its_own_space_name() -> None:
 
 @needs_mab
 def test_multi_row_sources_exist_so_the_collision_is_reachable() -> None:
-    """Guards the test above against becoming vacuous.
-
-    If every source were single-row the collision could not occur and the
-    assertion would pass for the wrong reason.
-    """
+    """Confirm the dataset includes sources whose blocks share a label."""
     from collections import Counter
 
     from gmbench import memoryagentbench as mab
@@ -1324,13 +1270,7 @@ def test_multi_row_sources_exist_so_the_collision_is_reachable() -> None:
 
 
 def test_list_spaces_follows_pagination(monkeypatch) -> None:
-    """Every page must be collected, not just the first.
-
-    The caller uses this listing to decide whether a space already exists. A
-    space on page two reads as absent, so the create that follows fails with
-    409 and the run dies. It stayed hidden while a run made 14 spaces and
-    surfaced the moment one made 130.
-    """
+    """The existence check needs spaces from every page of the listing."""
     from gmbench.client import GoodMemClient
 
     client = GoodMemClient("https://example.invalid", "key", tls_verify=False)
@@ -1355,12 +1295,10 @@ def test_list_spaces_follows_pagination(monkeypatch) -> None:
 
 
 def test_throttled_rerank_is_retried_not_recorded_as_a_dead_question() -> None:
-    """A 429 inside the stream must be retryable.
+    """A provider throttle inside the stream must reach the retry loop.
 
-    The provider throttle arrives as a RERANKING_FAILED status frame, not an
-    HTTP 429, so the transport retry never sees it. Treated as fatal it scores
-    the question zero: 248 of 500 EventQA questions died this way and halved
-    the source's published score.
+    The HTTP request has already succeeded, so its status cannot signal this
+    later failure.
     """
     import pytest as _pytest
 
@@ -1388,12 +1326,7 @@ def test_a_rerank_failure_that_is_not_a_throttle_stays_fatal() -> None:
 
 
 def test_resume_retries_errored_outcomes(tmp_path) -> None:
-    """An errored outcome must not count as completed.
-
-    An error scores zero, so treating it as done resumes the run into a
-    permanently depressed number -- and it is the questions that failed which
-    most need another attempt.
-    """
+    """Failed questions remain eligible for retry when the run resumes."""
     import json as _json
 
     from gmbench.mab_run import _retry_errored
@@ -1411,10 +1344,7 @@ def test_resume_retries_errored_outcomes(tmp_path) -> None:
 
 
 def test_mab_overall_verdict_follows_the_sign(tmp_path) -> None:
-    """The overall verdict must be computed, not hardcoded.
-
-    It read "behind" regardless, which was right only while the number was.
-    """
+    """The overall verdict follows the difference from the reference score."""
     import json as _json
 
     from gmbench.markdown import MAB_PAPER_RAW_RAG, mab_section
@@ -1440,12 +1370,9 @@ def test_mab_overall_verdict_follows_the_sign(tmp_path) -> None:
 
 
 def test_an_externally_reranked_run_is_not_described_by_its_config(tmp_path) -> None:
-    """The summary must name the reranker that actually ranked the results.
+    """External scorer provenance takes precedence over the configured reranker.
 
-    A --from-scores run is ranked outside GoodMem, but the summary described
-    whatever reranker was left in the config. That produced a published record
-    reading "VOYAGE rerank-2.5" for a run ranked by Qwen3-Reranker-4B -- a false
-    provenance claim in the one file a reader checks.
+    The hosted registration is unused when ranking comes from a score file.
     """
     from gmbench.exact_reranker import EXTERNAL_RERANKER, read_provenance, write_provenance
 
@@ -1458,3 +1385,23 @@ def test_an_externally_reranked_run_is_not_described_by_its_config(tmp_path) -> 
     assert recorded["model"] == EXTERNAL_RERANKER["model"]
     assert "Qwen3-Reranker-4B" in recorded["display_name"]
     assert "int8" in recorded["note"], "the disclosed deviation must travel with it"
+
+
+def test_documented_env_names_are_names_the_loader_reads() -> None:
+    """Every GMBENCH variable documented in the README must be read by the loader.
+
+    An unsupported variable has no effect, leaving the reader's intended model
+    selection unapplied.
+    """
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+    documented = set(re.findall(r"GMBENCH_[A-Z_]+", readme))
+    source = (
+        Path(__file__).resolve().parents[1] / "src" / "gmbench" / "config.py"
+    ).read_text()
+    read_by_loader = set(re.findall(r'"(GMBENCH_[A-Z_]+)"', source))
+
+    unread = documented - read_by_loader
+    assert not unread, (
+        f"README exports {sorted(unread)}, which nothing in config.py reads; "
+        f"the loader reads {sorted(read_by_loader)}"
+    )

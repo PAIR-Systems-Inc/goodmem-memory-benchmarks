@@ -1,4 +1,9 @@
-"""Run configuration loaded from TOML with environment overrides."""
+"""Load a run's TOML settings and apply environment overrides.
+
+Model registrations belong to a particular GoodMem instance, so they can be
+supplied through the environment. Dataset and result paths are resolved from
+the repository root, one directory above the config file.
+"""
 
 from __future__ import annotations
 
@@ -45,13 +50,11 @@ class ServerConfig:
 
 @dataclass(frozen=True, slots=True)
 class ModelConfig:
-    """GoodMem-side model registrations, by UUID, plus reader/judge model names.
+    """Model names and their GoodMem registration UUIDs.
 
-    The UUIDs are specific to one GoodMem instance, so they are supplied by
-    environment rather than committed. ``GMBENCH_EMBEDDER_ID``,
-    ``GMBENCH_RERANKER_ID``, ``GMBENCH_JUDGE_LLM_ID`` and
-    ``GMBENCH_READER_LLM_IDS`` (``model=uuid`` pairs, comma separated) override
-    whatever the run TOML carries.
+    The environment overrides registration fields in TOML. Reader registrations
+    are ``model=uuid`` pairs, so changing the reader also selects its endpoint.
+    See .env.example for the supported variables.
     """
 
     embedder_id: str = ""
@@ -81,12 +84,10 @@ class ModelConfig:
 
 @dataclass(frozen=True, slots=True)
 class ChunkingConfig:
-    """Character-based recursive chunking.
+    """Recursive chunking measured in characters.
 
-    GoodMem's TOKEN_COUNT length measurement currently falls back to character
-    count server-side, so character counts are what actually takes effect. With
-    one memory per conversation turn, a window this wide leaves nearly every
-    turn as a single chunk and only splits unusually long ones.
+    The default 1,500-character window keeps most LoCoMo turns whole. Longer
+    turns may produce several chunks, all carrying the same dialogue id.
     """
 
     chunk_size: int = 1500
@@ -109,12 +110,11 @@ class RetrievalConfig:
 
 @dataclass(frozen=True, slots=True)
 class IngestConfig:
-    """Ingestion batching, pacing, readiness polling and repair.
+    """Control how quickly memories are submitted and how long indexing may take.
 
-    One memory per turn means one embedding request per turn, so the embedding
-    provider's requests-per-minute ceiling -- not GoodMem -- is what bounds
-    ingest. ``embed_requests_per_minute`` paces submission to stay under it;
-    ``repair_rounds`` re-drives anything that failed anyway.
+    ``embed_requests_per_minute`` paces submissions for the embedding provider.
+    After each ingestion pass settles, failed memories can be recreated for up to
+    ``repair_rounds`` additional passes.
     """
 
     batch_size: int = 64
@@ -150,11 +150,10 @@ class RunConfig:
 
     @property
     def ingest_dir(self) -> Path:
-        """Where the space manifest lives.
+        """Directory containing the space manifest.
 
-        Spaces are a property of what was ingested, not of how it is retrieved,
-        so several retrieval runs can share one ingest by pointing at the same
-        ingest tag instead of re-uploading thousands of turns.
+        Several retrieval runs can reuse one index by sharing an ingest tag. Each
+        run still writes its answers under its own run tag.
         """
         return self.results_dir / self.ingest_tag
 

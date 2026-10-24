@@ -1,10 +1,11 @@
-"""Space provisioning and turn-level ingestion.
+"""Build the LoCoMo index, one GoodMem space per conversation.
 
-Each LoCoMo conversation becomes its own space, which keeps retrieval scoped to
-the conversation a question is about without relying on a metadata filter, and
-matches the paper's per-conversation index. Each conversation turn becomes its
-own memory, carrying its dialogue id, session, speaker and session date as
-metadata so evidence can be scored and neighbouring turns recovered exactly.
+Each turn becomes a memory with its dialogue id and session date in metadata.
+Retrieval can then recover the source turn and its neighbors by id. Separate
+spaces keep each question's search within the conversation it belongs to.
+
+Ingestion ends when every turn is indexed. A repair pass keeps completed
+memories and resubmits the missing turns.
 """
 
 from __future__ import annotations
@@ -175,25 +176,16 @@ def ingest(
     *,
     skip_populated: bool = True,
 ) -> dict[str, int]:
-    """Ingests every turn, then repairs anything that failed, until all are indexed.
+    """Index all conversation turns, retrying failed embeddings in repair passes.
 
-    Ingestion is paced to stay under the embedding provider's requests-per-minute
-    ceiling, and any memory that fails anyway is deleted and re-created, because
-    a partially indexed conversation would silently depress retrieval coverage.
+    Submissions are paced by the embedding request limit. Each pass deletes
+    failed memories and submits missing turns, then waits for processing to settle.
+    Raise GoodMemError if turns remain unindexed after the configured repairs;
+    otherwise return the indexed count for each conversation.
 
-    Args:
-      client: Connected GoodMem client.
-      config: Active run configuration.
-      conversations: Conversations to ingest.
-      bindings: Conversation id to space binding from provisioning.
-      skip_populated: Unused; kept so earlier call sites stay valid. Missing
-        turns are always computed from what is actually indexed.
-
-    Returns:
-      Conversation id to the number of turns indexed.
-
-    Raises:
-      GoodMemError: If turns are still missing after the configured repair rounds.
+    ``bindings`` maps conversation ids to their spaces. ``skip_populated`` is
+    retained for caller compatibility; indexed dialogue ids always determine
+    which turns need uploading.
     """
     del skip_populated
     limiter = RateLimiter.per_minute(config.ingest.embed_requests_per_minute)

@@ -1,18 +1,7 @@
-# LoCoMo with the paper's own retrieval models, for a comparable score.
-#
-# The paper reports two LoCoMo settings and they land within 0.06 points of each
-# other for the GPT-4o-mini reader:
-#
-#   Table 10  text-embedding-3-small + Cohere Rerank-v3.5   89.07 / 93.70
-#   Table 11  Qwen3-Embedding-4B     + Qwen3-Reranker-4B    89.13 / 94.55
-#                                       (gpt-4o-mini / gpt-4.1-mini)
-#
-# This configuration pairs the embedder from the first with the reranker from
-# the second, because those are the two paper-native components available on
-# this instance: there is no Cohere credential here, and Qwen3-Embedding-4B is
-# not served. So it is not an exact reproduction of either row, and the README
-# says so. Both components are models the paper itself used, and the two rows
-# bracket tightly enough to give an unambiguous target.
+# LoCoMo with the paper's retrieval depths: 128 candidates, 15 selections.
+# The hosted Qwen run uses text-embedding-3-small with DashScope qwen3-rerank.
+# This differs from table 10's Cohere reranker and table 11's Qwen embedder.
+# See docs/running.md for other rerankers and the local Qwen checkpoint.
 
 [run]
 run_tag = "paper-qwen3"
@@ -31,20 +20,10 @@ requests_per_second = 5.0
 llm_requests_per_second = 15.0
 
 [models]
-# Supplied from the environment; see .env.example. For this configuration:
-#   GMBENCH_EMBEDDER_ID -> OpenAI text-embedding-3-small (1536d)
-#   GMBENCH_RERANKER_ID -> the Qwen3 reranker, hosted (DashScope qwen3-rerank)
-#
-# A note on that reranker. Qwen3-Reranker is generative: it scores by prompting
-# the model with a yes/no relevance template (the paper's appendix G.1) and
-# reading the verdict. A generic score endpoint that does not apply that
-# template returns meaningless numbers. This instance also carries a
-# self-hosted Qwen3-Reranker-4B over vLLM, and measured against annotated
-# evidence it puts the gold turn in the top-15 only 16.7% of the time, against
-# 75.0% for no reranking at all -- actively harmful. The hosted DashScope
-# endpoint applies the template server-side and reaches 91.7%, the best of every
-# reranker available here, so that is what this configuration uses. It is the
-# paper's reranker family rather than its exact 4B checkpoint.
+# Set GMBENCH_EMBEDDER_ID to the text-embedding-3-small registration (1536d)
+# and GMBENCH_RERANKER_ID to the hosted qwen3-rerank registration.
+# Qwen rerankers need their yes/no relevance template. Check an endpoint with
+# verify-reranker before using it for a scored run.
 embedder_id = ""
 reranker_id = ""
 reader_model = "gpt-4o-mini"
@@ -56,14 +35,12 @@ judge_llm_id = ""
 [models.reader_llm_ids]
 
 [chunking]
+# Character-based chunks; the paper's token windows are a different boundary.
 chunk_size = 1500
 chunk_overlap = 150
 separators = ["\n\n", "\n", ". ", " ", ""]
 
 [retrieval]
-# The paper's two-stage depths, unchanged: 128 dense candidates, 15 reranked.
-# Holding these at the published values is the point of this configuration, so
-# the sweep-selected k=30 is deliberately not used here.
 dense_candidates = 128
 final_k = 15
 neighbor_turns = 2
@@ -76,7 +53,6 @@ batch_size = 64
 space_concurrency = 2
 ready_poll_seconds = 3.0
 ready_timeout_seconds = 3600.0
-# OpenAI's embedding limits are far above Voyage's 2,000 RPM, so ingest can run
-# closer to the server's own ceiling here.
+# Adjust the submission rate to your embedding provider's allowance.
 embed_requests_per_minute = 3000
 repair_rounds = 4

@@ -1,11 +1,9 @@
-"""A shared token bucket for pacing outbound requests.
+"""Share a request schedule across worker threads.
 
-Two different ceilings bind this harness, for different reasons. The GoodMem
-instance rate-limits per principal and answers 429 with ``Retry-After``. The
-embedding provider counts one request per memory and caps requests per minute.
-Retrying is not sufficient for either: several workers backing off on the same
-hint retry in lockstep and re-saturate the bucket immediately, so the client has
-to pace itself rather than rediscover the limit over and over.
+Each permit reserves the next available time slot. A throttle delays future
+reservations on the shared schedule; workers with existing reservations keep
+their slots. The client uses separate schedules for GoodMem requests and
+proxied model calls. Ingestion has its own embedding budget.
 """
 
 from __future__ import annotations
@@ -54,10 +52,9 @@ class RateLimiter:
             time.sleep(delay)
 
     def pause(self, seconds: float) -> None:
-        """Holds every waiter off for ``seconds`` after a server throttle.
+        """Postpone the next unreserved slot until at least ``seconds`` from now.
 
-        A 429 means the shared budget is already spent, so the whole pool should
-        stand down together rather than each worker retrying on its own clock.
+        Workers that have already reserved a slot keep their scheduled time.
         """
         if seconds <= 0:
             return

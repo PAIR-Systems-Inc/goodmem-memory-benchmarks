@@ -1,12 +1,9 @@
-"""Builds the committable artifact set for a finished run.
+"""Prepare a run's evidence for publication.
 
-A public reproduction is only checkable if the evidence ships with it, but the
-per-question contexts are tens of megabytes and do not belong in a repository.
-So the full reader and judge output ship compressed, and the retrieval stage
-ships as an index: which turns were selected and reached the reader, plus a
-digest of the rendered context. That is enough to recompute coverage
-independently and to audit what was retrieved, without redistributing the
-conversations themselves -- which are the benchmark's to license, not ours.
+Reader and judge outputs are compressed in full. Retrieval is exported as turn
+ids and a digest of each context, leaving the source conversations in the local
+dataset. The ids support coverage checks; the digests let a later run detect
+whether its reader would see different text.
 """
 
 from __future__ import annotations
@@ -27,7 +24,7 @@ from .summary import summary_path
 
 @dataclass(frozen=True, slots=True)
 class Artifact:
-    """One exported file and why it is small enough to commit."""
+    """An exported file with its size and a description."""
 
     path: Path
     bytes_written: int
@@ -70,14 +67,7 @@ def _retrieval_index(config: RunConfig, target: Path) -> int:
 
 
 def run(config: RunConfig) -> list[Artifact]:
-    """Exports the committable artifacts for this run.
-
-    Args:
-      config: Active run configuration.
-
-    Returns:
-      One entry per artifact written.
-    """
+    """Export the available run artifacts and return a record of each file written."""
     out_dir = config.run_dir / "export"
     model = config.models.reader_model
     artifacts: list[Artifact] = []
@@ -111,10 +101,8 @@ def run(config: RunConfig) -> list[Artifact]:
             )
         )
 
-    # MemoryAgentBench runs write one summary and one outcomes shard per
-    # capability rather than the LoCoMo answer/judge pair, so they are picked up
-    # by shape. Without this, `gmbench export` reported "nothing to export" on a
-    # finished MAB run and its evidence had to be copied by hand.
+    # MemoryAgentBench stores its predictions and grades together in an
+    # outcomes file, with a separate summary for each capability.
     for summary in sorted(config.run_dir.glob("mab-*-summary-*.json")):
         target = out_dir / summary.name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -161,21 +149,11 @@ class DriftReport:
 
 
 def compare_to_export(config: RunConfig, export_index: Path) -> DriftReport:
-    """Checks current retrieval contexts against the digests in a prior export.
+    """Compare current reader contexts with a previous retrieval export.
 
-    Retrieval runs again whenever the pipeline changes, and the reader answers
-    on disk were generated from the contexts of the run before it. If the
-    contexts are unchanged, those answers remain valid and only the cheap stages
-    need redoing; if they drifted, the answers are stale and must be regenerated.
-    Guessing wrong either wastes a paid pass or, worse, scores answers against
-    evidence they never saw.
-
-    Args:
-      config: Active run configuration.
-      export_index: Path to a previously exported ``retrieval-index.jsonl.gz``.
-
-    Returns:
-      A drift report; inspect ``stable``.
+    Matching digests establish that the context text is unchanged. A changed
+    context requires a new answer before it can be scored as part of this run.
+    ``export_index`` may be a compressed export or a raw retrieval shard.
     """
     prior: dict[str, str] = {}
     opener = gzip.open if export_index.suffix == ".gz" else open

@@ -1,17 +1,13 @@
-"""Running MemoryAgentBench through GoodMem, and scoring it.
+"""Run the four MemoryAgentBench capability groups through GoodMem.
 
-Scoped to Conflict Resolution. The other capability groups ship as a verified
-adapter rather than a scored run, because their contexts are enormous -- ReDial
-is 5.7M characters and InfBench is a hundred books at up to 3.2M each -- and
-ingesting them all would dominate everything else this repository measures. A
-partial score presented as a total would be exactly the kind of quiet wrongness
-the harness exists to prevent, so the gap is stated rather than papered over.
+Each dataset block supplies a context and the questions to ask of it. We index
+that context in its own space, retrieve evidence for each question, then apply
+the reader prompt and grader chosen for its source. The adapter in
+memoryagentbench.py defines how contexts divide into memories.
 
-Conflict Resolution is the cheapest group and the most interesting one for a
-memory system: a fact's precedence lives in its serial number, so the task asks
-directly whether that survives being stored and retrieved. Single-hop and
-multi-hop share a byte-identical context, so the fact pool is ingested once and
-queried by both.
+Most graders return a binary score. Book summaries receive fractional keypoint
+coverage, so aggregation uses Outcome.partial throughout. Source scores are
+combined according to capability_score at the end of the run.
 """
 
 from __future__ import annotations
@@ -72,17 +68,10 @@ class Outcome:
 
 
 def outcome_id(block: Block, task: Task) -> str:
-    """Returns the identity of one question, for both writing and resuming.
+    """Qualify a dataset question id with its block id.
 
-    The dataset's qa_pair_ids are not unique across blocks: all five EventQA
-    blocks number their questions no0..no99 while asking 500 different
-    questions, so the block has to qualify them.
-
-    This is one function because the two uses have to agree, and they did not.
-    Outcomes were written qualified while resume compared the raw dataset id, so
-    a resumed run matched nothing, re-ran every question and appended to the
-    existing shard -- doubling both the rows and the question total the summary
-    reported.
+    Question ids repeat across blocks: EventQA, for example, uses no0 through
+    no99 in each block. Writing and resuming must use the same qualified id.
     """
     return f"{block.block_id}:{task.qid}"
 
@@ -92,15 +81,11 @@ def outcomes_path(config: RunConfig, capability: str) -> Path:
 
 
 def score(prediction: str, answers: list[str]) -> bool:
-    """Scores a prediction against the acceptable gold strings.
+    """Check whether a prediction contains any acceptable answer.
 
-    MemoryAgentBench grades by containment, and ``answers`` is a set of
-    acceptable paraphrases rather than one string, so any of them counts.
-    Matching is case-insensitive and whitespace-normalised, and anchored at word
-    boundaries -- bare substring containment is wrong on the short answers these
-    sources use, where ``yes`` matches "yesterday" and ``50`` matches "150",
-    turning a wrong answer into a scored point. Nothing else is normalised;
-    stripping punctuation or stemming would loosen the metric silently.
+    Matching ignores case and repeated whitespace. Word boundaries keep short
+    answers distinct: "yes" must not match "yesterday", nor "50" match "150".
+    Punctuation is otherwise preserved.
     """
     if not prediction.strip():
         return False
@@ -162,26 +147,14 @@ def question_entities(question: str) -> list[str]:
 def gold_serial_for(
     units: list[Unit], answers: list[str], question: str
 ) -> int | None:
-    """Finds the newest fact that both names the question's entity and states a gold answer.
+    """Find the newest fact naming the question's entity and an acceptable answer.
 
-    Matching on the answer alone does not work: a gold string like "basketball"
-    appears in dozens of facts about unrelated entities, and the highest-serial
-    one among those is almost never the fact the question is about. The fact that
-    matters is the latest one about *this* entity, which is what the reader is
-    supposed to prefer over its earlier, conflicting sibling.
+    An answer such as "basketball" may occur in facts about many entities, so
+    both must match. Among matching facts, the largest serial takes precedence.
 
-    Returns ``None`` when no single fact satisfies both -- which is the normal
-    case for multi-hop, where the answer-bearing fact names the bridging entity
-    rather than the one in the question. That is a property of the task, not a
-    measurement failure, and the caller reports it as such.
-
-    Args:
-      units: Every fact in the pool.
-      answers: Acceptable gold answer strings.
-      question: The question, used to identify its entity.
-
-    Returns:
-      The highest serial among qualifying facts, or None if there are none.
+    Return None if no single fact meets both conditions. This is common for
+    multi-hop questions, whose answer may belong to an intermediate entity.
+    The result supports retrieval attribution; it does not grade the answer.
     """
     entities = question_entities(question)
     if not entities:
@@ -201,11 +174,9 @@ def gold_serial_for(
 
 
 def render_context(units: list[Unit]) -> str:
-    """Renders retrieved facts as a knowledge pool, in serial order.
+    """Present retrieved facts in serial order.
 
-    Serial order matters: the reader is instructed that a larger serial is
-    newer, so presenting the pool in that order is what makes the rule
-    applicable rather than something it has to reconstruct from scrambled lines.
+    The reader prompt gives larger serials precedence when facts conflict.
     """
     ordered = sorted(units, key=lambda unit: (unit.serial is None, unit.serial or 0))
     return "[Knowledge Pool]\n" + "\n".join(unit.text for unit in ordered)
@@ -250,15 +221,10 @@ def _settle_units(
 
 
 def space_name(block: Block, run_tag: str) -> str:
-    """Returns the space name holding one block's documents.
+    """Name a block's space using its block id and run tag.
 
-    Keyed on the block id, not the label. A source ships many rows, each a
-    self-contained document store, and several rows share one label. Keying on
-    the label collided them, so a row was answered against whichever row had
-    last been ingested, and the reuse check could not tell: a space full of
-    another block's documents is populated, COMPLETED and indistinguishable
-    from a correct one. It cost 607 of 2,071 questions, concentrated entirely
-    in the multi-row sources.
+    Blocks can share a source label while containing different documents.
+    Each needs its own space to keep those documents out of other questions.
     """
     return f"gmbench-mab-{block.block_id}-{run_tag}"[:255]
 
@@ -272,7 +238,7 @@ def provision_and_ingest(
       The space id and the units that were stored.
 
     Raises:
-      GoodMemError: If any unit is rejected or fails to embed.
+      GoodMemError: If a unit is rejected or remains unindexed after repairs.
     """
     units = block.units()
     if not units:
@@ -280,19 +246,15 @@ def provision_and_ingest(
 
     name = space_name(block, config.run_tag)
 
-    # Idempotent: a re-run should reuse a fact pool that is already stored
-    # rather than fail on the name, and should rebuild one that is incomplete
-    # rather than query a partial store.
+    # Reuse a matching space, then let the repair loop fill any gaps.
     existing = next((s for s in client.list_spaces() if s.get("name") == name), None)
     space_id = ""
     if existing is not None:
         space_id = existing["spaceId"]
         stored = client.list_memories(space_id)
         owners = {(m.get("metadata") or {}).get("block_id") for m in stored}
-        # Belt and braces: the name now carries the block id, so a mismatch
-        # should be impossible. Check anyway, because the failure this guards
-        # against is invisible in the results it produces -- a space holding
-        # another block's documents is populated, COMPLETED and looks healthy.
+        # Verify ownership in the stored metadata before reusing the space.
+        # Its name alone does not establish which documents it contains.
         if owners - {block.block_id}:
             tqdm.write(
                 f"{block.block_id}: space holds other blocks {sorted(owners)}; rebuilding it"
@@ -300,8 +262,7 @@ def provision_and_ingest(
             client.delete_space(space_id)
             space_id = ""
         else:
-            # Keep it and let the repair loop fill the gaps. Rebuilding would
-            # re-embed a thousand healthy units to replace the four that failed.
+            # Completed memories can be kept even if other units need repair.
             completed = sum(m.get("processingStatus") == "COMPLETED" for m in stored)
             if completed >= len(units):
                 tqdm.write(f"{block.source}: reusing {len(units)} facts already stored")
@@ -321,11 +282,8 @@ def provision_and_ingest(
 
     limiter = RateLimiter.per_minute(config.ingest.embed_requests_per_minute)
 
-    # Same discipline as the LoCoMo path: a unit that fails to embed is deleted
-    # and re-created, because a partially indexed store silently depresses
-    # retrieval for every question asked of it. Raising on the first failure
-    # instead -- which this did -- turns a transient provider error into a dead
-    # run, and the provider does fail transiently under concurrent ingestion.
+    # A settled pass may contain failed embeddings. Delete those memories and
+    # submit the missing units again, up to the configured repair limit.
     for round_index in range(config.ingest.repair_rounds + 1):
         done, failed = _indexed_unit_ids(client, space_id)
         for memory_id in failed:
@@ -464,8 +422,8 @@ def _answer_one(
             correct = False
         else:
             partial = coverage
-            # A summary is credited by coverage; the binary flag marks the
-            # majority covered, so the two numbers do not disagree in spirit.
+            # Preserve fractional coverage for aggregation. The binary field
+            # records whether at least half the keypoints were covered.
             correct = partial >= 0.5
     else:
         correct = score(prediction, answers)
@@ -488,16 +446,10 @@ def _answer_one(
 
 
 def _retry_errored(path: Path) -> set[str]:
-    """Returns the outcomes worth keeping, dropping errored ones from the shard.
+    """Remove errored outcomes from the shard and return the completed ids.
 
-    An errored outcome is not a completed one. Counting it as done means a
-    resume skips exactly the questions that need redoing -- and an error scores
-    zero, so the run would be resumed into a permanently depressed number. The
-    shard is rewritten without them so the retried rows append cleanly instead
-    of leaving two rows for one question.
-
-    Returns:
-      The ids of outcomes that succeeded and should not be repeated.
+    Rewriting first leaves room for each retried question to append one result
+    without duplicating its failed attempt.
     """
     if not path.exists():
         return set()
@@ -537,9 +489,7 @@ def run_capability(
     if not selected:
         raise GoodMemError(f"no blocks for capability {capability!r}")
 
-    # Preflight. A source without a reader template fails every one of its
-    # questions identically, which costs a full ingest and a few hundred
-    # requests to discover something knowable up front.
+    # Check prompt coverage before spending requests on ingestion.
     missing = sorted({b.source for b in selected if b.source not in MAB_QUERIES})
     if missing:
         raise GoodMemError(f"no reader template for sources: {missing}")
@@ -603,11 +553,11 @@ def run_capability(
 
 
 def summarize(outcomes: list[Outcome]) -> dict[str, Any]:
-    """Aggregates per-source accuracy plus retrieval attribution.
+    """Compute source accuracy and, where possible, attribute retrieval failures.
 
-    The attribution is the useful part. A wrong answer here has two quite
-    different causes -- the authoritative fact was never retrieved, or it was
-    retrieved and an older one won -- and accuracy alone conflates them.
+    For questions with an identifiable gold fact, track whether it reached the
+    reader. This distinguishes missing evidence from an incorrect answer made
+    with that evidence available.
     """
     by_source: dict[str, dict[str, Any]] = {}
     for outcome in outcomes:
@@ -657,24 +607,16 @@ def summarize(outcomes: list[Outcome]) -> dict[str, Any]:
 
 
 def capability_score(by_source: dict[str, dict[str, Any]]) -> float:
-    """Aggregates source scores the way the paper's appendix D.5 specifies.
+    """Combine source scores according to appendix D.5.
 
-    Three capabilities "average their constituent source scores". Test-Time
-    Learning does not: its five in-context sources are averaged together first,
-    and that average is then weighted equally against ReDial --
+    Each source has equal weight within its capability, except in Test-Time
+    Learning. There the five in-context-learning sources form one group with
+    the same weight as ReDial:
 
         TTL = (ReDial + mean(ICL_1..ICL_5)) / 2
 
-    A flat mean over its six sources instead gives the five in-context sources
-    five sixths of the weight rather than a half, which on our run reads 63.83
-    where the specified formula reads 47.50. Neither is a mean over questions,
-    which would let a source's question count decide its influence.
-
-    Args:
-      by_source: Source name to its bucket, each carrying an ``accuracy``.
-
-    Returns:
-      The capability score, or 0.0 when there are no sources.
+    ``by_source`` maps source names to dictionaries containing ``accuracy``.
+    An empty mapping returns 0.0.
     """
     if not by_source:
         return 0.0
@@ -687,7 +629,7 @@ def capability_score(by_source: dict[str, dict[str, Any]]) -> float:
 
 
 def write_summary(config: RunConfig, capability: str, document: dict[str, Any]) -> Path:
-    """Writes the capability summary and returns where it landed."""
+    """Write the capability summary and return its path."""
     path = config.run_dir / f"mab-{capability}-summary-{config.models.reader_model}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -723,12 +665,10 @@ REDIAL_RECALL_AT = 5
 
 
 def score_label(prediction: str, answers: list[str]) -> bool:
-    """Scores an in-context-learning answer by exact numeric label.
+    """Parse the predicted numeric label and compare it for exact equality.
 
-    Containment is wrong here. The labels are bare integers, so a prediction of
-    ``7`` would be scored correct against a gold of ``71`` and vice versa. The
-    reader is instructed to emit ``label: <int>``, so the label is parsed and
-    compared as a number.
+    The reader is asked for ``label: <int>``. Substring matching would confuse
+    labels such as 7 and 71.
     """
     if not prediction.strip():
         return False
@@ -740,12 +680,10 @@ def score_label(prediction: str, answers: list[str]) -> bool:
 
 
 def score_choice(prediction: str, answers: list[str]) -> bool:
-    """Scores a multiple-choice answer on its text rather than its letter.
+    """Compare multiple-choice answers after removing their option letters.
 
-    The released DetectiveQA items are not internally consistent: the first
-    item's gold is ``"C. The Brandt couple"`` while option C in its own prompt
-    reads ``"Suicide"``. The letter therefore cannot be trusted, so both sides
-    are stripped to the answer text and compared on that.
+    DetectiveQA's gold letters can disagree with the options in its prompts,
+    so the answer text determines the score.
     """
     if not prediction.strip():
         return False
@@ -807,17 +745,11 @@ def score_recall(
 def score_summary(
     client: GoodMemClient, config: RunConfig, summary: str, keypoints: list[str]
 ) -> float | None:
-    """Scores a book summary by how many required keypoints it covers.
+    """Ask the judge what fraction of the required plot points a summary covers.
 
-    Returns:
-      Coverage in [0, 1], or None when the judge could not be reached or its
-      reply could not be parsed. None rather than 0.0 on purpose: a judge
-      outage and a summary that covers nothing are the same number otherwise,
-      and the first is a broken measurement while the second is a result.
-
-    The benchmark ships keypoints as the rubric for this source, so coverage is
-    the metric; containment against a 1,000-word reference summary would
-    measure nothing.
+    Return a score in [0, 1], or None if the request fails or the response
+    cannot be parsed. A valid score of zero means no keypoints were covered;
+    None records an evaluation error.
     """
     points = [str(k).strip() for k in keypoints if str(k).strip()]
     if not points or not summary.strip():

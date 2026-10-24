@@ -1,16 +1,11 @@
-"""Scores query-document pairs with Qwen3-Reranker-4B, the paper's own checkpoint.
+"""Score saved query-document pairs with Qwen3-Reranker-4B.
 
-Qwen3-Reranker is generative: it does not emit a similarity score. It is prompted
-with a yes/no relevance question and the score is the probability it assigns to
-"yes" at the next position. An endpoint that serves the weights behind a generic
-scoring API without that template returns numbers that are not relevance, which
-is what the instance's vLLM deployment does -- it ranks an obviously relevant
-passage 81st of 128 with every score squeezed into a 0.26-wide band.
+The model answers a yes/no relevance question using Qwen's chat template and
+the instruction from the paper's appendix G.1. The score is the probability of
+yes after normalizing the two answer logits, rather than the full vocabulary.
 
-The template below is Qwen's documented one, and the instruction is the paper's
-appendix G.1 wording. Weights load in int8 because the GPU has under 6 GiB free
-against roughly 8 GiB of bf16 weights; that is a disclosed deviation, and the
-alternative was a different model entirely.
+Weights load in int8 to reduce GPU memory use. This precision differs from the
+original checkpoint and is recorded in the run's reranker provenance.
 """
 
 from __future__ import annotations
@@ -60,8 +55,10 @@ class Reranker:
 
     @torch.no_grad()
     def score(self, query: str, documents: list[str]) -> list[float]:
-        """Returns P(yes) for each document, which is the relevance score."""
+        """Return the yes probability, normalized over yes and no, for each document."""
         out: list[float] = []
+        # Reserve room for the complete prompt wrapper before truncating
+        # the question and passage. The suffix fixes the answer position.
         budget = self.max_length - len(self.prefix_ids) - len(self.suffix_ids)
         for start in range(0, len(documents), self.batch_size):
             chunk = documents[start : start + self.batch_size]
@@ -76,6 +73,8 @@ class Reranker:
                 padding=True,
                 return_tensors="pt",
             ).to(self.model.device)
+            # Left padding aligns the final position across the batch.
+            # Compare only the two permitted answers at that position.
             logits = self.model(**padded).logits[:, -1, :]
             pair = torch.stack([logits[:, self.no], logits[:, self.yes]], dim=1)
             out.extend(torch.softmax(pair.float(), dim=1)[:, 1].tolist())
@@ -85,8 +84,7 @@ class Reranker:
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Score gmbench dense candidates with Qwen3-Reranker-4B, the "
-            "reranker the paper uses, applying its documented template."
+            "Score gmbench dense candidates with Qwen3-Reranker-4B in int8."
         )
     )
     parser.add_argument(
@@ -104,9 +102,8 @@ def main() -> int:
         type=int,
         default=256,
         help=(
-            "Token budget per pair. LoCoMo turns come to about 70 tokens with "
-            "the template, so the default is generous and keeps the batch small "
-            "enough to fit beside int8 weights."
+            "Maximum tokens per query-document pair, including the prompt "
+            "template. Longer pairs are truncated (default: 256)."
         ),
     )
     parser.add_argument(

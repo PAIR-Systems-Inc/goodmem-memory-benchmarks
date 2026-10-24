@@ -1,11 +1,13 @@
-"""Evidence coverage: a reader-free diagnostic for tuning retrieval.
+"""Measure whether annotated evidence reached the reader.
 
-LoCoMo annotates each question with the dialogue ids that support its answer.
-Comparing those against the dialogue ids present in the assembled context gives
-a direct measure of evidence access -- the bottleneck the paper identifies as
-dominant (its Finding 1) -- without spending a single reader or judge token.
-Coverage bounds accuracy from above, so it is the right thing to tune on before
-committing to a scored run.
+LoCoMo identifies supporting turns by dialogue id. Comparing those references
+with the assembled context lets us inspect retrieval before making model calls.
+We report both the selected turns and the context after neighbor expansion, so
+the effect of expansion remains visible.
+
+Coverage is a diagnostic, not an accuracy bound: an answer may be supported by
+an unannotated turn, and the reader may fail even when the cited evidence is
+present.
 """
 
 from __future__ import annotations
@@ -32,9 +34,8 @@ class CoverageStats:
 
 
 def _summarize(label: str, records: list[RetrievalRecord]) -> CoverageStats:
-    # Only questions with at least one reference this conversation actually
-    # contains can be scored. The rest are excluded and counted, rather than
-    # charged to retrieval as a miss.
+    # Coverage needs at least one reference that resolves to a source turn.
+    # Count wholly absent references separately from retrieval misses.
     scored = [r for r in records if r.gold_evidence]
     excluded = sum(
         1 for r in records if not r.gold_evidence and r.gold_unresolvable

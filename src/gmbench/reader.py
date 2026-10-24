@@ -1,12 +1,9 @@
-"""Reader stage: turn retrieved evidence into an answer.
+"""Answer LoCoMo questions using the saved retrieval contexts.
 
-Calls go through GoodMem's provider proxy, which forwards to the registered
-upstream model and injects the stored credential. That keeps the provider key
-out of this process while still sending the paper's prompt verbatim -- the proxy
-passes the body through, so nothing here is reshaped by GoodMem's own
-post-processing. The reader is held at the paper's model on purpose: GoodMem is
-the retrieval system under test, and a stronger reader would raise the score
-without saying anything about retrieval.
+The reader receives the paper's prompt through GoodMem's provider proxy. Saving
+retrieval separately lets both reader models answer from the same evidence.
+Each completed call is written immediately, including its stop reason, so the
+judge can grade the answer and the report can flag truncation.
 """
 
 from __future__ import annotations
@@ -80,10 +77,10 @@ def answers_path(config: RunConfig) -> Path:
 
 
 def extract_final_answer(response: str) -> str:
-    """Returns the text after ``FINAL ANSWER:``, or the whole response if absent.
+    """Extract text after ``## FINAL ANSWER:``, or use the full response if absent.
 
-    This is the paper's extraction rule; keeping it identical matters because
-    the judge grades the extracted span, not the full chain of thought.
+    The fallback follows the paper's extraction rule. The integrity report
+    counts missing markers because the judge then sees the reasoning too.
     """
     match = _FINAL_ANSWER_RE.search(response)
     return (match.group(1) if match else response).strip()

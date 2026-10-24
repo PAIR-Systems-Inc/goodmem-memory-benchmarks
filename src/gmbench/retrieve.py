@@ -1,11 +1,13 @@
-"""Retrieval, turn expansion, and context assembly.
+"""Turn GoodMem's retrieval results into the context a LoCoMo reader sees.
 
-GoodMem returns the reranked chunks. Because the harness holds the source
-conversation locally, each selected chunk is resolved back to its turn by
-dialogue id, expanded to the turns either side of it, de-duplicated, and
-rendered in chronological order. That is this harness's analogue of the paper's
-display-time turn expansion, and it is what gives the reader the dependency
-paths that bare top-k windows tend to cut through.
+Each returned chunk carries a dialogue id. We resolve it against the local
+conversation, include neighboring turns, then merge overlapping selections
+into chronological order. Rendering from the dataset preserves the original
+text even when the index split a long turn into several chunks.
+
+The saved record keeps the ranking and the expanded context separately. This
+lets coverage distinguish evidence selected by retrieval from evidence added
+through neighboring turns.
 """
 
 from __future__ import annotations
@@ -78,14 +80,10 @@ def records_path(config: RunConfig) -> Path:
 
 
 def ranked_dia_ids(chunks: list[RetrievedChunk]) -> list[str]:
-    """Pulls the dialogue id off each reranked chunk, preserving rank order.
+    """Read dialogue ids from chunk metadata, preserving rank order.
 
-    Every memory this harness writes carries a ``dia_id``, so one missing means
-    the space holds something this run did not put there. Dropping it quietly
-    would shrink the evidence for that question with nothing to show why.
-
-    Raises:
-      GoodMemError: If a reranked chunk carries no string ``dia_id``.
+    Each indexed LoCoMo memory must carry a string ``dia_id``. Raise
+    GoodMemError if one is missing, since the source turn cannot be recovered.
     """
     out: list[str] = []
     for chunk in chunks:
@@ -132,6 +130,8 @@ def expand(
             f"{conversation.conversation_id}: retrieved dialogue ids absent from the "
             f"dataset: {unknown[:5]}; the index and the dataset disagree"
         )
+    # Neighbor windows overlap. Keying by turn index merges them before
+    # restoring the conversation order used by the reader.
     ordered = [keep[index] for index in sorted(keep)]
     return selected, ordered
 
@@ -150,6 +150,7 @@ def render_context(turns: list[Turn]) -> str:
                 f"({turn.session_date.strftime('%d %B %Y, %I:%M %p')}) ---"
             )
         elif previous_index is not None and turn.turn_index != previous_index + 1:
+            # Mark gaps so separate excerpts do not read as one exchange.
             lines.append("[...]")
         lines.append(turn.render())
         previous_session = turn.session_id
@@ -234,9 +235,8 @@ def run(
     path = records_path(config)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Written as each question lands rather than in one go at the end: a full
-    # sweep is thousands of rate-limited requests, and losing all of them to a
-    # late failure would be the expensive kind of mistake.
+    # Flush each completed retrieval so an interrupted run retains its evidence.
+    # Downstream stages check the file against the expected question ids.
     records: list[RetrievalRecord] = []
     with path.open("w") as handle:
         with tqdm(total=len(jobs), desc="retrieve", unit="q") as progress:
@@ -291,11 +291,10 @@ def collect_dense(
     *,
     limit_per_conversation: int | None = None,
 ) -> list[exact_reranker.Candidates]:
-    """Fetches the dense candidate set for every question, without reranking.
+    """Save dense candidate sets for an external reranker.
 
-    This is the first of three phases for running the paper's own reranker,
-    which no endpoint here serves correctly. Writing the candidates out lets the
-    reranker run in its own environment, so this package needs no GPU.
+    The scorer can read this file in a separate GPU environment, then return
+    scores for assemble_from_scores to turn into reader contexts.
     """
     jobs: list[tuple[Conversation, SpaceBinding, Question]] = []
     for conversation in conversations:
@@ -346,10 +345,10 @@ def assemble_from_scores(
     *,
     scores_file: Path | None = None,
 ) -> list[RetrievalRecord]:
-    """Builds reader contexts from an external reranker's scores.
+    """Build reader contexts from externally scored candidates.
 
-    The third phase. Expansion, de-duplication and rendering are identical to
-    the in-GoodMem path; only the ranking came from elsewhere.
+    After ranking, use the same neighbor expansion and rendering as the hosted
+    reranker path.
     """
     by_conversation = {c.conversation_id: c for c in conversations}
     questions = {

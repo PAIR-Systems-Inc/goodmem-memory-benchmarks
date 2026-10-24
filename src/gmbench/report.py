@@ -10,7 +10,7 @@ from .summary import Integrity, Score
 from .sweep import SweepCell
 
 # RAW-RAG, LoCoMo, text-embedding-3-small + Cohere Rerank-v3.5 (paper table 10).
-# These are the numbers to beat, by reader. Single/multi/temporal/open/overall.
+# Reference percentages by reader and question category.
 PAPER_RAW_RAG: dict[str, dict[str, float]] = {
     "gpt-4o-mini": {
         "single_hop": 94.57,
@@ -50,10 +50,9 @@ _ROW_ORDER = ("single_hop", "multi_hop", "temporal", "open_domain", "overall")
 
 
 def coverage_table(stats: list[CoverageStats], console: Console | None = None) -> None:
-    """Prints evidence coverage per category.
+    """Show annotated-evidence coverage before and after context expansion.
 
-    Coverage bounds accuracy from above, so this is the table to tune on before
-    spending reader and judge tokens.
+    Use this to inspect retrieval without making reader or judge calls.
     """
     console = console or Console()
     table = Table(title="Evidence coverage (annotated-evidence questions only)")
@@ -91,11 +90,9 @@ def coverage_table(stats: list[CoverageStats], console: Console | None = None) -
 
 
 def integrity_panel(checks: Integrity, console: Console | None = None) -> None:
-    """States whether any scored zero was plumbing rather than judgement.
+    """Show evaluation errors and incomplete responses before displaying accuracy.
 
-    This prints before the accuracy table on purpose. A number that looks
-    reasonable but is partly made of failed requests is the failure mode worth
-    catching, and it is invisible in the accuracy table itself.
+    These counts help distinguish a low model score from an unreliable run.
     """
     console = console or Console()
     if checks.clean:
@@ -104,12 +101,12 @@ def integrity_panel(checks: Integrity, console: Console | None = None) -> None:
             f"{checks.judgements_present} judgements, no reader or judge failures."
         )
         return
-    console.print("[bold red]Integrity: CONTAMINATED[/bold red]")
+    console.print("[bold red]Integrity: needs review[/bold red]")
     for problem in checks.problems():
         console.print(f"  [red]•[/red] {problem}")
     console.print(
-        "[yellow]Scores below include these as zeros. Re-run the affected stage "
-        "before quoting them.[/yellow]"
+        "[yellow]Failed requests score zero. Responses without a final-answer "
+        "marker are graded in full. Review these counts before using the scores.[/yellow]"
     )
 
 
@@ -118,17 +115,11 @@ def accuracy_table(
     reader_model: str,
     console: Console | None = None,
 ) -> None:
-    """Prints measured accuracy, with intervals, against the published rows.
+    """Compare per-category scores with the paper's reference figures.
 
-    The interval is the point of this table. Differences of a point or two on
-    these slice sizes are inside sampling noise, and the published figures carry
-    comparable uncertainty of their own, so a bare delta invites reading a win
-    or a regression into nothing.
-
-    Args:
-      scores: Per-slice scores with bootstrap intervals.
-      reader_model: Reader model name, used to pick the comparison column.
-      console: Optional console to print to.
+    Each verdict locates the published point estimate within or outside this
+    run's bootstrap interval. It does not account for uncertainty in the
+    published score.
     """
     console = console or Console()
     paper = PAPER_RAW_RAG.get(reader_model, {})
@@ -158,7 +149,7 @@ def accuracy_table(
         elif reference > score.ci_high:
             verdict, delta = "[red]behind[/red]", f"{score.accuracy - reference:+.2f}"
         else:
-            verdict = "[dim]tie (within noise)[/dim]"
+            verdict = "[dim]tie (reference within CI)[/dim]"
             delta = f"{score.accuracy - reference:+.2f}"
         table.add_row(
             key,
@@ -174,8 +165,8 @@ def accuracy_table(
     console.print(table)
     console.print(
         "[dim]Verdict compares the published point estimate against our interval. "
-        "The published figures have their own uncertainty, which is not shown and "
-        "would widen every comparison further.[/dim]"
+        "It does not account for uncertainty in the published figure or establish "
+        "statistical equivalence.[/dim]"
     )
     if not paper:
         console.print(
@@ -185,12 +176,10 @@ def accuracy_table(
 
 
 def sweep_table(cells: list[SweepCell], console: Console | None = None) -> None:
-    """Prints sweep results, best full coverage first.
+    """Show sweep configurations in descending order of full evidence coverage.
 
-    The context columns matter as much as coverage: the paper's expanded LoCoMo
-    evidence averages roughly 4,800 tokens, so a cell that wins on coverage
-    while spending far more than that is buying it with budget rather than with
-    better retrieval.
+    Context size is shown alongside coverage because selecting more text can
+    improve coverage while increasing the reader's cost.
     """
     console = console or Console()
     table = Table(title="Retrieval sweep (coverage on sampled questions)")

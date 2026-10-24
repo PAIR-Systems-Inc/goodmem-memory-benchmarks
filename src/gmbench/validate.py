@@ -1,13 +1,8 @@
-"""Completeness gates between stages.
+"""Check that a saved stage covers exactly the requested questions.
 
-Every stage here writes a JSONL file that the next stage reads, and each row is
-keyed by question id. A short file is the dangerous failure: it looks exactly
-like a complete one, so a stage that silently processed 800 of 1,540 questions
-still produces a plausible table. The paper is explicit that this is the thing
-to guard -- appendix D.4 requires "the expected question count and a unique
-identifier linking each question to its context, answer, and judgments" -- so
-nothing downstream consumes a file without checking it against the question set
-it was supposed to cover.
+Each downstream stage knows the expected question ids. Comparing those with
+the file's rows catches missing work, duplicate rows and results from another
+selection before they can affect the score.
 """
 
 from __future__ import annotations
@@ -21,7 +16,7 @@ class IncompleteStageError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class Completeness:
-    """The difference between what a stage produced and what it owed."""
+    """Missing, duplicate and unexpected question ids in a stage output."""
 
     stage: str
     expected: int

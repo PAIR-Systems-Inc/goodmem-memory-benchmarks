@@ -1,10 +1,8 @@
-"""Grid sweep over retrieval depth and expansion radius, scored on coverage.
+"""Compare retrieval settings using annotated-evidence coverage.
 
-Two facts make this cheap. Reranked order is stable under truncation, so one
-retrieval pass at the largest ``final_k`` also answers every smaller one. And
-expansion is a client-side step over the local dataset, so every
-``neighbor_turns`` value is free once the selections are known. A whole grid
-therefore costs one retrieval pass per distinct ``ef_search``, not one per cell.
+For each ef_search value, retrieve at the largest depth in the grid. Smaller
+depths use prefixes of that ranking, and all neighbor expansions use local
+turns. The grid therefore needs one retrieval pass per ef_search value.
 """
 
 from __future__ import annotations
@@ -39,20 +37,12 @@ class SweepCell:
 def stratified_sample(
     conversations: list[Conversation], size: int
 ) -> list[tuple[Conversation, Question]]:
-    """Samples questions spread evenly across conversations and categories.
+    """Sample evenly across conversations and question categories.
 
-    Even sampling deliberately over-weights the hard categories relative to
-    their true share -- LoCoMo is 841 single-hop against 92 open-domain -- which
-    sharpens the tuning signal where the headroom actually is. The consequence
-    is that sweep coverage is not comparable to a full-set number: use it to
-    rank configurations, then re-run the winner over everything.
-
-    Args:
-      conversations: Conversations to sample from.
-      size: Target number of questions; the whole set is used if smaller.
-
-    Returns:
-      Conversation and question pairs, deterministic for a given input.
+    This gives small categories more influence than they have in the full
+    dataset: LoCoMo has 96 open-domain questions and 841 single-hop questions.
+    Use the sample to compare settings, then measure the chosen setting on all
+    questions. Selection is deterministic for a given input and target size.
     """
     buckets: dict[tuple[str, int], list[tuple[Conversation, Question]]] = defaultdict(list)
     for conversation in conversations:
@@ -201,11 +191,9 @@ class RerankerVerdict:
 
     @property
     def usable(self) -> bool:
-        """Whether it beats doing no reranking at all.
+        """Whether all calls succeeded and at least some gold evidence was retrieved.
 
-        The bar is deliberately that low. A reranker scoring below the dense
-        baseline is not weak, it is inverted, and shipping a benchmark on one is
-        how a configuration error gets published as a result.
+        The caller separately compares coverage with the full-depth reference.
         """
         return self.failed == 0 and self.gold_at_k > 0.0
 
@@ -220,24 +208,13 @@ def verify_rerankers(
     sample_size: int = 24,
     final_k: int = 15,
 ) -> tuple[float, list[RerankerVerdict]]:
-    """Measures each reranker against LoCoMo's annotated evidence.
+    """Compare rerankers with a full-depth reference on the same question sample.
 
-    This is the check that found a registered Qwen3-Reranker-4B endpoint placing
-    correct evidence in the top-15 16.7% of the time where no reranking managed
-    75.0%. It costs no reader tokens, so it is worth running before any scored
-    pass on a reranker whose serving has not been verified.
-
-    Args:
-      client: Connected GoodMem client.
-      config: Active run configuration.
-      conversations: Conversations to sample questions from.
-      bindings: Conversation id to space binding.
-      reranker_ids: Rerankers to measure.
-      sample_size: Questions to sample.
-      final_k: Depth at which to check for the gold turn.
-
-    Returns:
-      The dense-only baseline, and one verdict per reranker.
+    For each ranking, measure how often annotated evidence appears within
+    ``final_k``. The reference requests all candidates through the first
+    reranker, then takes its top-k prefix. It is also reranked; an independent
+    dense baseline would require retrieve_dense. Return the reference coverage
+    and each reranker's coverage and failed request count.
     """
     sample = [
         (conversation, question)
@@ -300,8 +277,8 @@ def verify_rerankers(
             )
         )
 
-    # The dense baseline: the gold turn among the top final_k by vector score
-    # alone, which is what any reranker has to improve on.
+    # The cached full-depth response has already passed through the first
+    # reranker. Its prefix is the reference used by this diagnostic.
     for conversation, question, ranked in cached:
         baseline_hits += bool(gold_for(conversation, question) & set(ranked[:final_k]))
     baseline = 100.0 * baseline_hits / len(cached) if cached else 0.0
