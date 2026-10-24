@@ -15,7 +15,7 @@
 # bracket tightly enough to give an unambiguous target.
 
 [run]
-run_tag = "paper-models"
+run_tag = "paper-qwen3"
 ingest_tag = "paper-models"
 dataset_path = "data/locomo10.json"
 results_dir = "results"
@@ -33,7 +33,18 @@ llm_requests_per_second = 15.0
 [models]
 # Supplied from the environment; see .env.example. For this configuration:
 #   GMBENCH_EMBEDDER_ID -> OpenAI text-embedding-3-small (1536d)
-#   GMBENCH_RERANKER_ID -> Qwen/Qwen3-Reranker-4B served over vLLM
+#   GMBENCH_RERANKER_ID -> the Qwen3 reranker, hosted (DashScope qwen3-rerank)
+#
+# A note on that reranker. Qwen3-Reranker is generative: it scores by prompting
+# the model with a yes/no relevance template (the paper's appendix G.1) and
+# reading the verdict. A generic score endpoint that does not apply that
+# template returns meaningless numbers. This instance also carries a
+# self-hosted Qwen3-Reranker-4B over vLLM, and measured against annotated
+# evidence it puts the gold turn in the top-15 only 16.7% of the time, against
+# 75.0% for no reranking at all -- actively harmful. The hosted DashScope
+# endpoint applies the template server-side and reaches 91.7%, the best of every
+# reranker available here, so that is what this configuration uses. It is the
+# paper's reranker family rather than its exact 4B checkpoint.
 embedder_id = ""
 reranker_id = ""
 reader_model = "gpt-4o-mini"
