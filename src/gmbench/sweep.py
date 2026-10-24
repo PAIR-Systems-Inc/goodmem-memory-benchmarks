@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 from tqdm import tqdm
 
-from .client import GoodMemClient
+from .client import GoodMemClient, GoodMemError
 from .config import RunConfig
 from .coverage import compute
 from .ingest import SpaceBinding
@@ -186,3 +186,123 @@ def run(
                 )
 
     return sorted(cells, key=lambda cell: cell.full_coverage, reverse=True)
+
+
+@dataclass(frozen=True, slots=True)
+class RerankerVerdict:
+    """How well one reranker surfaces annotated evidence."""
+
+    reranker_id: str
+    display_name: str
+    model: str
+    questions: int
+    gold_at_k: float
+    failed: int
+
+    @property
+    def usable(self) -> bool:
+        """Whether it beats doing no reranking at all.
+
+        The bar is deliberately that low. A reranker scoring below the dense
+        baseline is not weak, it is inverted, and shipping a benchmark on one is
+        how a configuration error gets published as a result.
+        """
+        return self.failed == 0 and self.gold_at_k > 0.0
+
+
+def verify_rerankers(
+    client: GoodMemClient,
+    config: RunConfig,
+    conversations: list[Conversation],
+    bindings: dict[str, SpaceBinding],
+    *,
+    reranker_ids: list[str],
+    sample_size: int = 24,
+    final_k: int = 15,
+) -> tuple[float, list[RerankerVerdict]]:
+    """Measures each reranker against LoCoMo's annotated evidence.
+
+    This is the check that found a registered Qwen3-Reranker-4B endpoint placing
+    correct evidence in the top-15 16.7% of the time where no reranking managed
+    75.0%. It costs no reader tokens, so it is worth running before any scored
+    pass on a reranker whose serving has not been verified.
+
+    Args:
+      client: Connected GoodMem client.
+      config: Active run configuration.
+      conversations: Conversations to sample questions from.
+      bindings: Conversation id to space binding.
+      reranker_ids: Rerankers to measure.
+      sample_size: Questions to sample.
+      final_k: Depth at which to check for the gold turn.
+
+    Returns:
+      The dense-only baseline, and one verdict per reranker.
+    """
+    sample = [
+        (conversation, question)
+        for conversation, question in stratified_sample(conversations, sample_size * 3)
+        if question.evidence
+    ][:sample_size]
+
+    def gold_for(conversation: Conversation, question: Question) -> set[str]:
+        return set(conversation.resolvable_evidence(question)[0])
+
+    baseline_hits = 0
+    cached: list[tuple[Conversation, Question, list[str]]] = []
+    with tqdm(total=len(sample), desc="dense baseline", unit="q") as bar:
+        for conversation, question in sample:
+            chunks = client.retrieve(
+                question.question,
+                bindings[conversation.conversation_id].space_id,
+                dense_candidates=config.retrieval.dense_candidates,
+                final_k=config.retrieval.dense_candidates,
+                reranker_id=reranker_ids[0],
+                ef_search=config.retrieval.ef_search,
+                iterative_scan=config.retrieval.iterative_scan,
+            )
+            ranked = ranked_dia_ids(chunks)
+            cached.append((conversation, question, ranked))
+            bar.update(1)
+
+    verdicts: list[RerankerVerdict] = []
+    for reranker_id in reranker_ids:
+        described = client.describe_model("rerankers", reranker_id)
+        hits = failed = 0
+        with tqdm(total=len(sample), desc=described.get("model", reranker_id)[:22], unit="q") as bar:
+            for conversation, question in sample:
+                try:
+                    chunks = client.retrieve(
+                        question.question,
+                        bindings[conversation.conversation_id].space_id,
+                        dense_candidates=config.retrieval.dense_candidates,
+                        final_k=final_k,
+                        reranker_id=reranker_id,
+                        ef_search=config.retrieval.ef_search,
+                        iterative_scan=config.retrieval.iterative_scan,
+                    )
+                except GoodMemError:
+                    failed += 1
+                    bar.update(1)
+                    continue
+                top = set(ranked_dia_ids(chunks))
+                hits += bool(gold_for(conversation, question) & top)
+                bar.update(1)
+        scored = len(sample) - failed
+        verdicts.append(
+            RerankerVerdict(
+                reranker_id=reranker_id,
+                display_name=described.get("display_name", ""),
+                model=described.get("model", ""),
+                questions=scored,
+                gold_at_k=100.0 * hits / scored if scored else 0.0,
+                failed=failed,
+            )
+        )
+
+    # The dense baseline: the gold turn among the top final_k by vector score
+    # alone, which is what any reranker has to improve on.
+    for conversation, question, ranked in cached:
+        baseline_hits += bool(gold_for(conversation, question) & set(ranked[:final_k]))
+    baseline = 100.0 * baseline_hits / len(cached) if cached else 0.0
+    return baseline, verdicts

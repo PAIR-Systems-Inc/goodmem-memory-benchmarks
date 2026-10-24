@@ -163,8 +163,31 @@ served, which reaches 91.7% on the same measurement and is the best of every
 reranker available. It is the closest available approximation, not a
 reproduction.
 
-**To close this gap**, register Cohere Rerank-v3.5 on your instance, or serve
-Qwen3-Reranker-4B so that it applies its relevance template, then:
+#### Check a reranker before you trust it
+
+The check that found this ships as a command. It costs no reader tokens, and it
+measures any reranker against LoCoMo's annotated evidence with the dense-only
+baseline alongside for reference:
+
+```bash
+gmbench --config config/locomo-paper.toml --ingest-tag paper-qwen3 \
+        verify-reranker --rerankers <uuid> <uuid> ...
+```
+
+```
+Reranker check — gold evidence in top-15
+  no reranking (dense only)   83.3%
+  rerank-2.5                  87.5%   helps
+  qwen3-rerank                83.3%   helps
+  Qwen/Qwen3-Reranker-4B      16.7%   worse than no reranking
+```
+
+It exits non-zero when any reranker scores below the dense baseline, because at
+that point the stage is not weak but inverted, and no scored pass should be run
+on it.
+
+**To close the comparability gap**, register Cohere Rerank-v3.5 on your instance,
+or serve Qwen3-Reranker-4B so that it applies its relevance template, then:
 
 ```bash
 GMBENCH_RERANKER_ID=<the working reranker> \

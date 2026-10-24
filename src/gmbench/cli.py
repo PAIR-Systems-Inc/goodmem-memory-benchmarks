@@ -142,6 +142,56 @@ def _expected_qids(cfg: config_module.RunConfig, args: argparse.Namespace) -> li
     ]
 
 
+def cmd_verify_reranker(args: argparse.Namespace, console: Console) -> int:
+    """Measures rerankers against annotated evidence, before trusting one."""
+    cfg = _load(args)
+    convs = _conversations(cfg, args.conversations_limit)
+    bindings = ingest.load_manifest(cfg)
+    missing = [c.conversation_id for c in convs if c.conversation_id not in bindings]
+    if missing:
+        console.print(f"[red]No space for {missing}; run ingest first[/red]")
+        return 1
+    ids = args.rerankers or [cfg.models.reranker_id]
+    if not any(ids):
+        console.print("[red]No reranker ids given and none configured[/red]")
+        return 1
+
+    with _client(cfg) as client:
+        baseline, verdicts = sweep.verify_rerankers(
+            client, cfg, convs, bindings, reranker_ids=[i for i in ids if i],
+            sample_size=args.sample, final_k=cfg.retrieval.final_k,
+        )
+
+    table = Table(title=f"Reranker check — gold evidence in top-{cfg.retrieval.final_k}")
+    table.add_column("Model", style="bold")
+    table.add_column("N", justify="right")
+    table.add_column("Gold@k", justify="right")
+    table.add_column("Failed", justify="right")
+    table.add_column("Verdict")
+    table.add_row(
+        "[dim]no reranking (dense only)[/dim]", str(args.sample), f"{baseline:.1f}%", "-", ""
+    )
+    worst = False
+    for verdict in sorted(verdicts, key=lambda v: -v.gold_at_k):
+        below = verdict.gold_at_k < baseline
+        worst = worst or below
+        table.add_row(
+            verdict.model or verdict.reranker_id,
+            str(verdict.questions),
+            f"{verdict.gold_at_k:.1f}%",
+            str(verdict.failed) if verdict.failed else "-",
+            "[red]worse than no reranking[/red]" if below else "[green]helps[/green]",
+        )
+    console.print(table)
+    if worst:
+        console.print(
+            "[red]A reranker below the dense baseline is not weak, it is inverted — "
+            "most likely a generative reranker served without its relevance "
+            "template. Do not run a scored pass on it.[/red]"
+        )
+    return 1 if worst else 0
+
+
 def cmd_coverage(args: argparse.Namespace, console: Console) -> int:
     cfg = _load(args)
     records = retrieve.load_records(cfg, _expected_qids(cfg, args))
@@ -504,6 +554,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("retrieve", cmd_retrieve, "Retrieve and expand evidence for every question."),
         ("coverage", cmd_coverage, "Report evidence coverage from saved retrievals."),
         ("sweep", cmd_sweep, "Grid-search retrieval depth and expansion on coverage."),
+        ("verify-reranker", cmd_verify_reranker, "Check rerankers against annotated evidence."),
         ("read", cmd_read, "Generate answers from saved retrievals."),
         ("judge", cmd_judge, "Grade saved answers and report accuracy."),
         ("report", cmd_report, "Print coverage and accuracy for a run."),
@@ -517,6 +568,13 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         child = sub.add_parser(name, help=help_text)
         child.set_defaults(handler=handler)
+        if name == "verify-reranker":
+            child.add_argument(
+                "--rerankers", nargs="*", default=None, help="Reranker UUIDs to check."
+            )
+            child.add_argument(
+                "--sample", type=int, default=24, help="Questions to sample (default 24)."
+            )
         if name == "table":
             child.add_argument(
                 "--runs",
