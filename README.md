@@ -91,11 +91,19 @@ strongest agentic system in the paper's comparison — on every `gpt-4.1-mini`
 row. The paper-models configurations reach that on **~2,700 evidence tokens
 against the paper's ~4,800**, a little over half the context budget.
 
-One integrity note on the paper-reranker `gpt-4.1-mini` row: 2 of its 1,540
-reader answers hit the token cap and emitted no `FINAL ANSWER:` marker, so the
-whole response was graded for those two. The run is therefore flagged
-contaminated by this harness's own gate rather than reported as clean. The other
-five rows are clean, 4,620 judgements each, no reader or judge failures.
+**One integrity note, bounded.** The paper-reranker `gpt-4.1-mini` row is
+flagged *contaminated* by this harness's own gate: 2 of its 1,540 reader answers
+hit the 4,096-token cap mid-chain-of-thought and emitted no `FINAL ANSWER:`
+marker, so the whole response was graded for those two. Both were judged CORRECT
+3/3 — the truncated reasoning happened to contain the answer — so the flag is
+directional and the worst case is knowable: if both are in fact wrong, the row
+falls **0.13 points**, to 93.29, and still ties RAW-RAG's 93.70. No verdict in
+this table turns on it.
+
+The cap was deliberately left at 4,096 rather than raised for this row alone.
+Raising it would have made the row less comparable to the other five, which all
+used 4,096 and all came back clean — the opposite of the point. The other five
+rows are clean: 4,620 judgements each, no reader or judge failures.
 
 > **One gap remains.** Cohere Rerank-v3.5, the reranker in the paper's table 10,
 > has never been run here: this instance has no Cohere credential. Table 11's
@@ -310,13 +318,20 @@ plausible number is not, so the harness is built to make the second impossible.
   printed **before** the scores; `report` exits non-zero when any are present.
   The paper scores these as zeros and keeps them in the denominator, which this
   matches so the number stays comparable — counting them separately is what stops
-  an outage from passing as a low score. Every run published here is clean.
+  an outage from passing as a low score. Five of the six LoCoMo rows published
+  here are clean; the sixth is flagged, and the flag is quantified beside the
+  table rather than explained away.
 - **Stream verification.** The server frames each result set as BEGIN, items, END
   and states how many items to expect. All three are checked, so a truncated
   response cannot return a shorter, plausible result set.
-- **Degradation is fatal.** A partial or timed-out vector search aborts the
-  request rather than returning fewer chunks. So does a status code the harness
-  does not recognise.
+- **Degradation is fatal, throttling is retried.** A partial or timed-out vector
+  search aborts the request rather than returning fewer chunks, and so does a
+  status code the harness does not recognise. The one exception is a provider
+  throttle, which arrives inside the stream as a degraded status rather than an
+  HTTP 429: that is retried with a pool-wide pause, because treating it as fatal
+  recorded a dead question and cost 248 of 500 EventQA questions before it was
+  caught. The distinction is narrow and matched on the message — a rerank that
+  failed for any other reason still stops the run.
 - **Resumable stages.** Reader and judge flush each row as it lands and resume by
   question id, so an interrupted pass costs the remainder rather than all of it.
 - **Drift detection.** `drift` compares current contexts against a prior export's
@@ -324,6 +339,21 @@ plausible number is not, so the harness is built to make the second impossible.
   generated from older evidence.
 - **Generated tables.** The published numbers come from `gmbench table` reading
   the run summaries. Transcription is as silent a failure as any other.
+- **Recorded provenance.** A run reranked outside GoodMem writes
+  `reranker-provenance.json`, and the summary prefers it over the reranker named
+  in the config. Without it an externally reranked run was published as
+  `VOYAGE rerank-2.5` — a model that was never called.
+- **One store per block.** A space is keyed on the block it holds and refuses
+  contents belonging to another block. A space full of the wrong documents is
+  populated, COMPLETED and indistinguishable from a correct one, which is how
+  607 MemoryAgentBench questions were answered against the wrong evidence.
+- **Repair, not abort.** A unit that fails to embed is deleted and re-created
+  for a bounded number of rounds; only an unindexed remainder is fatal. A
+  partially indexed store silently depresses retrieval for every question asked
+  of it, and stopping on the first transient failure is neither correct nor
+  recoverable.
+- **Errors are not completions.** Resume drops errored rows and retries them.
+  Counting an error as done resumes a run into a permanently depressed score.
 
 ---
 
@@ -561,10 +591,27 @@ gmbench export                    # write the committable evidence set
 gmbench table                     # regenerate the README tables
 ```
 
+To reproduce the paper-reranker rows, retrieval splits into three phases around
+an external reranker, which also keeps a GPU dependency out of the package:
+
+```bash
+gmbench --run-tag paper-exact retrieve --dense-only     # write the dense top-128
+python tools/qwen3_reranker.py \
+    --candidates results/paper-exact/dense-candidates.jsonl \
+    --out results/paper-exact/rerank-scores.jsonl --resume
+gmbench --run-tag paper-exact retrieve --from-scores    # assemble reader contexts
+```
+
+`tools/requirements-reranker.txt` installs the scorer's dependencies; it resumes
+by question id, and `read_scores` refuses anything short of an exact cover with
+matching per-question counts, since a silent misalignment would rerank each
+question against another's scores and produce a plausible, meaningless result.
+
 Other stages: `sweep` grid-searches retrieval depth and expansion on coverage
-alone; `coverage` reports it from saved retrievals; `drift` checks contexts
-against a prior export; `beam` measures ingestion cost; `mab-inspect` reports the
-MemoryAgentBench selection.
+alone; `coverage` reports it from saved retrievals; `verify-reranker` measures a
+reranker against annotated evidence before a scored pass; `drift` checks contexts
+against a prior export; `beam` measures ingestion cost; `mab`/`mab-inspect` run
+and report MemoryAgentBench.
 
 Useful flags: `--run-tag` to keep runs separate, `--ingest-tag` to point a new
 retrieval run at an existing ingest, `--reader-model` to switch reader,
