@@ -9,7 +9,7 @@ from pathlib import Path
 from rich.console import Console
 
 from . import config as config_module
-from . import beam, coverage, export, ingest, judge, memoryagentbench as mab
+from . import beam, coverage, export, ingest, judge, markdown, memoryagentbench as mab
 from . import reader, report, retrieve, summary, sweep
 from .client import GoodMemClient
 from .locomo import load as load_locomo
@@ -192,7 +192,12 @@ def _emit(
     """
     expected = _expected_qids(cfg, args)
     records = retrieve.load_records(cfg, expected)
-    document = summary.build(cfg, records, answers, judgements)
+    with _client(cfg) as client:
+        models = {
+            "embedder": client.describe_model("embedders", cfg.models.embedder_id),
+            "reranker": client.describe_model("rerankers", cfg.models.reranker_id),
+        }
+    document = summary.build(cfg, records, answers, judgements, models)
     path = summary.write(cfg, document)
 
     checks = summary.integrity(answers, judgements, cfg.models.judge_repetitions)
@@ -346,6 +351,37 @@ def cmd_mab_inspect(args: argparse.Namespace, console: Console) -> int:
     return 0
 
 
+def cmd_table(args: argparse.Namespace, console: Console) -> int:
+    """Prints the README's results tables, generated from the summary files."""
+    cfg = _load(args)
+    labelled: dict[str, Path] = {}
+    for item in args.runs or [f"{cfg.run_tag}={cfg.run_tag}"]:
+        label, _, tag = item.partition("=")
+        labelled[label] = cfg.results_dir / (tag or label)
+
+    rows = markdown.load_summaries(labelled)
+    if not rows:
+        console.print("[yellow]No summaries found; run the stages first.[/yellow]")
+        return 1
+
+    text = markdown.document(rows, labelled)
+    if args.out:
+        out = Path(args.out)
+        out.write_text(text)
+        console.print(f"[green]Wrote {out}[/green] ({len(rows)} scored runs)")
+    else:
+        print(text)
+    unclean = [r for r in rows if not r.clean]
+    if unclean:
+        console.print(
+            "[red]Integrity problems in: "
+            + ", ".join(f"{r.label}/{r.reader}" for r in unclean)
+            + "[/red]"
+        )
+        return 1
+    return 0
+
+
 def cmd_run(args: argparse.Namespace, console: Console) -> int:
     for step in (cmd_ingest, cmd_retrieve, cmd_read, cmd_judge):
         code = step(args, console)
@@ -406,10 +442,21 @@ def build_parser() -> argparse.ArgumentParser:
         ("drift", cmd_drift, "Check current contexts against a prior export's digests."),
         ("beam", cmd_beam, "Measure sequential ingestion cost on the BEAM 1M conversation."),
         ("mab-inspect", cmd_mab_inspect, "Report the MemoryAgentBench question selection."),
+        ("table", cmd_table, "Print the README results tables from run summaries."),
         ("run", cmd_run, "Ingest, retrieve, read and judge in one go."),
     ):
         child = sub.add_parser(name, help=help_text)
         child.set_defaults(handler=handler)
+        if name == "table":
+            child.add_argument(
+                "--runs",
+                nargs="*",
+                default=None,
+                help="Labelled runs as Label=run-tag, e.g. 'Paper models=paper-models'.",
+            )
+            child.add_argument(
+                "--out", default=None, help="Write the document here instead of stdout."
+            )
         if name == "beam":
             child.add_argument(
                 "--parquet",

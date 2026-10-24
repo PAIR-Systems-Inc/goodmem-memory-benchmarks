@@ -154,8 +154,19 @@ def build(
     records: list[RetrievalRecord],
     answers: list[AnswerRecord],
     judgements: list[JudgeRecord],
+    models: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, object]:
-    """Assembles the summary document for a finished run."""
+    """Assembles the summary document for a finished run.
+
+    Args:
+      config: Active run configuration.
+      records: Retrieval records.
+      answers: Reader answers.
+      judgements: Judge records.
+      models: Optional resolved model descriptions, keyed ``embedder`` and
+        ``reranker``, so the published summary names the models rather than
+        only their instance-specific UUIDs.
+    """
     checks = integrity(answers, judgements, config.models.judge_repetitions)
     evidence_chars = [len(record.context) for record in records]
     return {
@@ -165,8 +176,8 @@ def build(
         "reader_model": config.models.reader_model,
         "judge_model": config.models.judge_model,
         "judge_repetitions": config.models.judge_repetitions,
-        "embedder_id": config.models.embedder_id,
-        "reranker_id": config.models.reranker_id,
+        "embedder": (models or {}).get("embedder", {}),
+        "reranker": (models or {}).get("reranker", {}),
         "retrieval": {
             "dense_candidates": config.retrieval.dense_candidates,
             "final_k": config.retrieval.final_k,

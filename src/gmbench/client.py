@@ -276,6 +276,34 @@ class GoodMemClient:
         """Deletes one memory."""
         self._request("DELETE", f"/v1/memories/{memory_id}")
 
+    def describe_model(self, kind: str, model_id: str) -> dict[str, str]:
+        """Resolves a registration UUID to its provider and model identifier.
+
+        A bare UUID in a published result tells a reader nothing and is specific
+        to one instance; the model name is what makes the run reproducible
+        elsewhere.
+
+        Args:
+          kind: One of ``embedders``, ``rerankers`` or ``llms``.
+          model_id: The registration UUID.
+
+        Returns:
+          Provider, model identifier and display name; empty strings if the
+          registration cannot be read, since a summary should not fail over a
+          missing label.
+        """
+        if not model_id:
+            return {"provider": "", "model": "", "display_name": ""}
+        try:
+            record = self._request("GET", f"/v1/{kind}/{model_id}") or {}
+        except GoodMemError:
+            return {"provider": "", "model": "", "display_name": ""}
+        return {
+            "provider": str(record.get("providerType") or ""),
+            "model": str(record.get("modelIdentifier") or ""),
+            "display_name": str(record.get("displayName") or ""),
+        }
+
     # -- proxied inference -------------------------------------------------
 
     def chat_completion(
