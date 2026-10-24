@@ -355,11 +355,15 @@ plausible number is not, so the harness is built to make the second impossible.
 - **Integrity accounting.** Failed reader calls, answers truncated at the token
   cap, errored judge requests and unparseable judge labels are each counted and
   printed **before** the scores; `report` exits non-zero when any are present.
-  The paper scores these as zeros and keeps them in the denominator, which this
-  matches so the number stays comparable — counting them separately is what stops
-  an outage from passing as a low score. Five of the six LoCoMo rows published
-  here are clean; the sixth is flagged, and the flag is quantified beside the
-  table rather than explained away.
+  Counting them separately is what stops an outage from passing as a low score.
+  Two categories are treated differently and the difference matters: a *failed*
+  call scores zero and stays in the denominator, as the paper does, while an
+  answer with no `FINAL ANSWER:` marker is graded on its full response — which is
+  the paper's own extraction rule, not a fallback this harness invented. So the
+  flag on such a row is the gate being conservative about paper-faithful
+  behaviour, which is why the one flagged row here is bounded rather than
+  re-run. Five of the six LoCoMo rows are clean; the sixth is flagged, and the
+  flag is quantified beside the table rather than explained away.
 - **Stream verification.** The server frames each result set as BEGIN, items, END
   and states how many items to expect. All three are checked, so a truncated
   response cannot return a shorter, plausible result set.
