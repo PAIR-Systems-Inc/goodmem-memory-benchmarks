@@ -1408,3 +1408,32 @@ def test_resume_retries_errored_outcomes(tmp_path) -> None:
     assert keep == {"a", "c"}, "errored question was treated as done"
     remaining = [_json.loads(line) for line in path.read_text().splitlines() if line.strip()]
     assert [r["qid"] for r in remaining] == ["a", "c"], "errored row was left in the shard"
+
+
+def test_mab_overall_verdict_follows_the_sign(tmp_path) -> None:
+    """The overall verdict must be computed, not hardcoded.
+
+    It read "behind" regardless, which was right only while the number was.
+    """
+    import json as _json
+
+    from gmbench.markdown import MAB_PAPER_RAW_RAG, mab_section
+
+    for capability, theirs in MAB_PAPER_RAW_RAG.items():
+        out = tmp_path / f"run-{capability}" / "export"
+        out.mkdir(parents=True)
+        (out / f"mab-{capability}-summary-gpt-4o-mini.json").write_text(
+            _json.dumps(
+                {
+                    "capability": capability,
+                    "accuracy": theirs + 5.0,
+                    "questions": 100,
+                    "errors": 0,
+                    "by_source": {},
+                }
+            )
+        )
+
+    overall = [ln for ln in mab_section(tmp_path) if "**Overall**" in ln]
+    assert len(overall) == 1
+    assert "ahead (+5.00)" in overall[0], overall[0]

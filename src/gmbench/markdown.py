@@ -255,9 +255,23 @@ def mab_section(results_dir: Path) -> list[str]:
     checkout does not produce a section full of blanks.
     """
     found: dict[str, dict] = {}
+    source_of: dict[str, str] = {}
     for path in sorted(results_dir.glob("*/export/mab-*-summary-*.json")):
+        run = path.parent.parent.name
+        # A superseded run stays on disk for provenance, so it must not be able
+        # to supply a published number. Without this the glob picked up whichever
+        # directory sorted last.
+        if "broken" in run or run.startswith("_"):
+            continue
         data = json.loads(path.read_text())
-        found[data["capability"]] = data
+        capability = data["capability"]
+        if capability in found:
+            raise ValueError(
+                f"two live runs report {capability}: {source_of[capability]} and {run}; "
+                "archive the superseded one"
+            )
+        found[capability] = data
+        source_of[capability] = run
     if not found:
         return []
 
@@ -289,9 +303,10 @@ def mab_section(results_dir: Path) -> list[str]:
     if len(scores) == len(_MAB_ORDER):
         ours = sum(scores) / len(scores)
         theirs = sum(MAB_PAPER_RAW_RAG[k] for k in _MAB_ORDER) / len(_MAB_ORDER)
+        delta = ours - theirs
         lines.append(
             f"| **Overall** (mean of four) | {questions} | **{ours:.2f}** | "
-            f"{theirs:.2f} | behind ({ours - theirs:+.2f}) | — |"
+            f"{theirs:.2f} | {'ahead' if delta > 0 else 'behind'} ({delta:+.2f}) | — |"
         )
     else:
         missing = [_MAB_PRETTY[k] for k in _MAB_ORDER if k not in found]

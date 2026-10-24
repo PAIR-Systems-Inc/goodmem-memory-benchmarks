@@ -1,0 +1,59 @@
+{
+  "benchmark": "memoryagentbench",
+  "capability": "accurate_retrieval",
+  "run_tag": "mab-ar-fixed",
+  "reader_model": "gpt-4o-mini",
+  "retrieval": {
+    "dense_candidates": 128,
+    "final_k": 15
+  },
+  "scoring": "substring containment against the acceptable gold strings",
+  "scope_note": "Only this capability group was scored. The other three ship as a verified adapter; their contexts run to millions of characters per block and were out of budget here.",
+  "questions": 1000,
+  "accuracy": 71.48333333333333,
+  "accuracy_question_weighted": 73.3,
+  "aggregation": "per the paper's appendix D.5: the mean of source scores, except test-time learning, where the five in-context sources are averaged first and then combined equally with ReDial",
+  "errors": 0,
+  "by_source": {
+    "ruler_qa1": {
+      "questions": 100,
+      "correct": 87.0,
+      "gold_retrieved": 0,
+      "gold_identifiable": 0,
+      "errors": 0,
+      "accuracy": 87.0,
+      "gold_retrieval_rate": null,
+      "gold_identifiable_rate": 0.0
+    },
+    "ruler_qa2": {
+      "questions": 100,
+      "correct": 69.0,
+      "gold_retrieved": 0,
+      "gold_identifiable": 0,
+      "errors": 0,
+      "accuracy": 69.0,
+      "gold_retrieval_rate": null,
+      "gold_identifiable_rate": 0.0
+    },
+    "eventqa": {
+      "questions": 500,
+      "correct": 468.0,
+      "gold_retrieved": 0,
+      "gold_identifiable": 0,
+      "errors": 0,
+      "accuracy": 93.6,
+      "gold_retrieval_rate": null,
+      "gold_identifiable_rate": 0.0
+    },
+    "longmemeval": {
+      "questions": 300,
+      "correct": 109.0,
+      "gold_retrieved": 0,
+      "gold_identifiable": 0,
+      "errors": 0,
+      "accuracy": 36.333333333333336,
+      "gold_retrieval_rate": null,
+      "gold_identifiable_rate": 0.0
+    }
+  }
+}

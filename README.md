@@ -5,12 +5,28 @@ retrieval baseline from **[*Is Complex Agentic Memory Always Needed? Naive RAG I
 Stronger Than We Thought*](https://arxiv.org/abs/2610.30755)** (arXiv:2610.30755v1), on the
 paper's own benchmarks, with the paper's own reader, prompts and grading rules.
 
-**The finding: parity.** On LoCoMo, GoodMem lands statistically indistinguishable
-from RAW-RAG — the paper's hand-tuned naive-RAG baseline — and ahead of the
-strongest agentic memory system in its comparison. That is the whole claim. It is
-deliberately not "GoodMem wins": the differences against RAW-RAG are smaller than
-this measurement's own noise, and a repository that overstated them would be the
-first thing a reader checked.
+**The finding: the paper's conclusion holds.** Naive retrieval over raw
+conversation history, done with a production memory system rather than a
+hand-tuned research script, matches the paper's RAW-RAG baseline and beats the
+agentic memory systems it was compared against.
+
+| Benchmark | GoodMem | RAW-RAG | |
+|---|---:|---:|---|
+| LoCoMo, `gpt-4.1-mini` | 93.23 | 93.70 | statistical tie, ahead of best agentic (91.69) |
+| LoCoMo, `gpt-4o-mini` | 88.72 | 89.07 | statistical tie |
+| MemoryAgentBench | 51.44 | 48.32 | ahead on three of four capability groups |
+| BEAM-1M ingest | 3.004 s/message | — | flat from 0 to 1M tokens |
+
+On LoCoMo this is parity and nothing more: the differences are smaller than this
+measurement's own 0.7-point noise floor, and a repository that read them as a win
+would be the first thing a reader checked. On MemoryAgentBench the margin is
++3.12, which is worth stating plainly but also worth distrusting — it rests on
+single runs, and the published figures carry their own unshown uncertainty.
+
+Read the MemoryAgentBench section before relying on that row. It first read
+**42.56**, a clear loss, and was published here as one; four harness bugs were
+responsible, and how they were found is documented at length because it bears on
+how much to trust the rest.
 
 ---
 
@@ -278,7 +294,7 @@ plausible number is not, so the harness is built to make the second impossible.
 | Benchmark | Questions | Status |
 |---|---:|---|
 | **LoCoMo** | 1,540 | Fully scored, two configurations, both readers |
-| **MemoryAgentBench** | 2,071 | **Withdrawn and being re-measured** — a harness bug invalidated 607 questions |
+| **MemoryAgentBench** | 2,071 | Fully scored, all four capability groups, zero errors |
 | **BEAM-1M** | — | Fully measured: 1,710 messages, 1.43 h, flat per-message cost |
 | LongMemEval-S | 500 | Data acquired and verified, adapter not written |
 | PersonaMem-v2 | 5,000 | Data acquired and verified, adapter not written |
@@ -288,129 +304,150 @@ plausible number is not, so the harness is built to make the second impossible.
 All four capability groups, all 2,071 published questions, reader `gpt-4o-mini`,
 128 dense candidates to top-15.
 
-| Capability | GoodMem | RAW-RAG | Stability across identical runs |
-|---|---:|---:|---|
-| Accurate Retrieval | 54.10 | 67.85 | 54.08 – 58.48 over four runs |
-| Test-Time Learning | 46.35 | 47.68 | 46.35 – 47.50 over two runs |
-| Long-Range Understanding | 18.31 | 31.74 | 18.31 – 30.58 over two runs |
-| Conflict Resolution | 51.50 | 46.00 | 51.50 in every run |
-| **Overall** (mean of four) | **42.56** | **48.32** | — |
+| Capability | N | GoodMem | RAW-RAG | |
+|---|---:|---:|---:|---|
+| Accurate Retrieval | 1,000 | 71.48 | 67.85 | ahead +3.63 |
+| Test-Time Learning | 700 | 46.35 | 47.68 | behind −1.33 |
+| Long-Range Understanding | 171 | 36.43 | 31.74 | ahead +4.69 |
+| Conflict Resolution | 200 | 51.50 | 46.00 | ahead +5.50 |
+| **Overall** (mean of four) | 2,071 | **51.44** | 48.32 | **ahead +3.12** |
 
-> ### These numbers are withdrawn
->
-> **A harness bug meant 607 of the 2,071 questions were answered against the
-> wrong documents.** The table above is left in place because it was published,
-> not because it is correct. Clean figures will replace it.
->
-> Each MemoryAgentBench row is a self-contained document store, and several rows
-> share one source label. The space holding a row's documents was named after
-> the *label* rather than the row, so rows of the same source collided on one
-> space — and the guard meant to catch a half-built store could not see it,
-> because a space full of **another row's** documents is populated, COMPLETED
-> and indistinguishable from a correct one. A row whose unit count did not
-> exceed its predecessor's was therefore answered against the previous row's
-> documents.
->
-> The damage lands entirely on the multi-row sources:
->
-> | Source | Rows | Questions answered against the wrong store | Published score |
-> |---|---:|---:|---:|
-> | `infbench_sum` | 100 | **97 of 100** | 0.00 |
-> | `longmemeval` | 5 | **180 of 300** | 11.00 |
-> | `eventqa` | 5 | **300 of 500** | 48.40 |
-> | `detective_qa` | 10 | **30 of 71** | 36.62 |
-> | `ruler_qa1`/`qa2`, all `icl_*`, `recsys_redial`, `factconsolidation_*` | 1 each | **0** | 69–94 |
->
-> That split is the capability split. Accurate Retrieval and Long-Range
-> Understanding — the two groups reported as behind — are the two containing
-> multi-row sources. Test-Time Learning (level) and Conflict Resolution (ahead)
-> are built entirely from single-row sources and have no affected questions. It
-> also explains the run-to-run variance reported in the third column, which was
-> described as reranker noise and was nothing of the kind: which rows were
-> poisoned depended on the order their unit counts happened to fall in.
->
-> Fixed by keying the space on the row id, and by refusing a space that holds
-> any other row's documents. Two regression tests cover it. Accurate Retrieval
-> and Long-Range Understanding are being re-run; Test-Time Learning and Conflict
-> Resolution are unaffected and stand.
-
-Aggregation follows the paper's appendix D.5. Three capabilities average their
-source scores; Test-Time Learning does not — its five in-context sources are
-averaged first and then weighted equally against ReDial. Using a flat mean over
-TTL's six sources instead reads 63.83 where the specified formula reads 46.35,
+Three of four groups ahead, one a point and a third behind, zero errors across
+all 2,071 questions. Aggregation follows the paper's appendix D.5: three
+capabilities average their source scores, while Test-Time Learning averages its
+five in-context sources first and weights that equally against ReDial. A flat
+mean over TTL's six sources reads 63.83 where the specified formula reads 46.35,
 so the rule is worth getting right.
+
+> **An earlier version of this table read 42.56, behind RAW-RAG on three of four
+> groups.** Those numbers were wrong, and the way they were wrong is worth
+> reading before trusting anything else here — see
+> [Four bugs stood between us and this number](#four-bugs-stood-between-us-and-this-number).
 
 #### By source
 
-| Capability | Source | N | Accuracy | Range over repeat runs |
-|---|---|---:|---:|---|
-| Accurate Retrieval | `ruler_qa1` | 100 | 88.00 | 88.00 – 88.00 |
-| Accurate Retrieval | `ruler_qa2` | 100 | 69.00 | 68.00 – 69.00 |
-| Accurate Retrieval | `eventqa` | 500 | 48.40 | 48.00 – 59.60 |
-| Accurate Retrieval | `longmemeval` | 300 | 11.00 | 11.00 – 19.33 |
-| Test-Time Learning | `icl_banking77` | 100 | 87.00 | 86.00 – 87.00 |
-| Test-Time Learning | `icl_clinic150` | 100 | 86.00 | 86.00 – 86.00 |
-| Test-Time Learning | `icl_nlu` | 100 | 86.00 | 84.00 – 86.00 |
-| Test-Time Learning | `icl_trec_coarse` | 100 | 61.00 | 61.00 – 61.00 |
-| Test-Time Learning | `icl_trec_fine` | 100 | 41.00 | 41.00 – 43.00 |
-| Test-Time Learning | `recsys_redial` | 200 | 20.50 | 20.50 – 23.00 |
-| Long-Range Understanding | `detective_qa` | 71 | 36.62 | 36.62 – 59.15 |
-| Long-Range Understanding | `infbench_sum` | 100 | 0.00 | 0.00 – 2.00 |
-| Conflict Resolution | `factconsolidation_sh` | 100 | 94.00 | 93.00 – 94.00 |
-| Conflict Resolution | `factconsolidation_mh` | 100 | 9.00 | 9.00 – 10.00 |
+| Capability | Source | N | Accuracy |
+|---|---|---:|---:|
+| Accurate Retrieval | `eventqa` | 500 | 93.60 |
+| Accurate Retrieval | `ruler_qa1` | 100 | 87.00 |
+| Accurate Retrieval | `ruler_qa2` | 100 | 69.00 |
+| Accurate Retrieval | `longmemeval` | 300 | 36.33 |
+| Test-Time Learning | `icl_banking77` | 100 | 87.00 |
+| Test-Time Learning | `icl_clinic150` | 100 | 86.00 |
+| Test-Time Learning | `icl_nlu` | 100 | 86.00 |
+| Test-Time Learning | `icl_trec_coarse` | 100 | 61.00 |
+| Test-Time Learning | `icl_trec_fine` | 100 | 41.00 |
+| Test-Time Learning | `recsys_redial` | 200 | 20.50 |
+| Long-Range Understanding | `detective_qa` | 71 | 70.42 |
+| Long-Range Understanding | `infbench_sum` | 100 | 2.44 |
+| Conflict Resolution | `factconsolidation_sh` | 100 | 94.00 |
+| Conflict Resolution | `factconsolidation_mh` | 100 | 9.00 |
+
+#### Four bugs stood between us and this number
+
+This benchmark first read **42.56** against RAW-RAG's 48.32, and that figure was
+published here as a genuine loss, with an explanation of which capabilities were
+weak and why. The explanation was wrong, because the measurement was. Four
+defects, each of which hid the next:
+
+**1. Blocks collided on one document store.** Each MemoryAgentBench row is a
+self-contained store, and several rows share one source label. The space was
+named after the *label*, so rows of a source collided — and the guard meant to
+catch a half-built store could not see it, because a space full of **another
+row's** documents is populated, COMPLETED and indistinguishable from a correct
+one. **607 of 2,071 questions** were answered against documents belonging to a
+different row. Verified against the live instance: the longmemeval space held 919
+memories carrying exactly one row's id while all 300 of its questions were asked
+of it.
+
+**2. A failed unit killed the run instead of being retried.** The LoCoMo path had
+always deleted and re-created a unit that failed to embed, because a partly
+indexed store silently depresses retrieval. The MAB path had the detection
+without the repair, so it chose the one outcome that is neither correct nor
+recoverable: it stopped.
+
+**3. `list_spaces` returned only its first page.** Fixing the collision took a
+run from 14 spaces to 130, and the instance to 185. The existence check then read
+a space on page two as absent and the create that followed failed with a 409.
+Older than the other bugs and unreachable until the first fix made it reachable.
+
+**4. A throttled reranker scored the question zero.** A provider 429 arrives
+inside the retrieve stream as a degraded-status frame, not an HTTP 429, so the
+transport retry never saw it and the question was recorded dead. **248 of 500**
+EventQA questions died this way — which is why EventQA read 48.60 after the
+collision fix, against 93.60 once its questions were actually attempted. The
+first fix worked; this bug took its place and looked like the first one not
+working.
+
+What each fix moved:
+
+| Source | Published | Clean | Cause |
+|---|---:|---:|---|
+| `eventqa` | 48.40 | **93.60** | collision, then throttling |
+| `detective_qa` | 36.62 | **70.42** | collision |
+| `longmemeval` | 11.00 | **36.33** | collision |
+| `infbench_sum` | 0.00 | 2.44 | collision; still a real limit |
+| single-row sources | 69–94 | unchanged | never affected |
+
+Every multi-row source was poisoned and every single-row source was clean, which
+is exactly why the two groups built from multi-row sources were the two reported
+as behind. Test-Time Learning and Conflict Resolution never had an affected
+question and their numbers are unchanged.
+
+The earlier README also attributed the run-to-run variance in these sources —
+`detective_qa` 36.62–59.15, `eventqa` 48.00–59.60 — to loose grading of free
+generation. That was wrong too. It was bug 1 moving around: which rows got
+poisoned depended on the order their unit counts happened to fall in. The clean
+run has no such spread.
+
+Each of these is now covered by a regression test, and the first was found only
+because a hard 0.00 on `infbench_sum` across 100 questions with zero errors is
+not a weak result, it is a broken one. It was written up as a weakness for some
+time before being treated as a defect.
 
 #### Where GoodMem is strong
 
-The five in-context-learning sources (86–87 on Banking77, CLINC150 and NLU) and
-RULER (88.00) are the cleanest results in this repository, and both are stable to
-within a point across runs. Single-hop fact consolidation reaches
-94.00, and for the 92% of those
-questions where one fact both names the entity and states the answer, GoodMem put
-that exact fact in front of the reader **100% of the
-time** — from 2,310 facts of which hundreds are near-identical in form. The
-remaining points there are the reader preferring an older conflicting fact, not a
-retrieval miss.
+EventQA at 93.60 over 500 questions is the strongest result here. The five
+in-context-learning sources (86–87 on Banking77, CLINC150 and NLU) and RULER
+(87.00) are the most stable. Single-hop fact consolidation reaches 94.00, and for
+the 92% of those questions where one fact both names the entity and states the
+answer, GoodMem put that exact fact in front of the reader **100% of the time** —
+from 2,310 facts of which hundreds are near-identical in form. The remaining
+points there are the reader preferring an older conflicting fact, not a retrieval
+miss.
 
 #### Where it is weak, and why
 
-**Multi-hop fact consolidation (9.00) is unreachable by
-construction.** Only 1% of those questions have
-a single fact naming the question's entity *and* stating the answer, because the
-answer-bearing fact names the bridging entity instead. Asked *"Where did the
-religion associated with the Bagratuni Dynasty come into existence?"*, the gold
-fact is `475. Christianity was founded in the city of Taipei.` — zero words
-shared with the question. One query cannot reach it, and the paper's baseline is
-deliberately single-shot: it *"isolates evidence access from query-time search
-control."* Adding a hop would score better and stop being comparable.
+**Multi-hop fact consolidation (9.00) is unreachable by construction.** Only 1%
+of those questions have a single fact naming the question's entity *and* stating
+the answer, because the answer-bearing fact names the bridging entity instead.
+Asked *"Where did the religion associated with the Bagratuni Dynasty come into
+existence?"*, the gold fact is `475. Christianity was founded in the city of
+Taipei.` — zero words shared with the question. One query cannot reach it, and
+the paper's baseline is deliberately single-shot: it *"isolates evidence access
+from query-time search control."* Adding a hop would score better and stop being
+comparable.
 
-**InfBench summarization (0.00) is not a top-k retrieval task.** The reader sees
+**InfBench summarization (2.44) is not a top-k retrieval task.** The reader sees
 15 passages, roughly 30,000 characters of a 3.2-million-character book — under
-1% — and writes a plausible but generic summary that matches none of the 25
-specific plot points the benchmark grades against. The judge is working: it
-receives the full rubric and returns 0 of 25 covered. The paper's LRU of 31.74
-implies its own InfBench score is also near zero, given DetectiveQA around 60.
+1% — and writes a plausible but generic summary matching few of the 25 specific
+plot points graded against. The judge is working: it receives the full rubric and
+returns 0 or 1 of 25 covered. This one was *not* the bug — it read 0.00 poisoned
+and 2.44 clean. The paper's LRU of 31.74 implies its own InfBench score is also
+near zero, given DetectiveQA around 60; ours is 70.42.
 
-**LongMemEval within MemoryAgentBench (11.00) is a genuine weakness worth
-chasing.** It is a different setting from the standalone benchmark, where RAW-RAG
+**LongMemEval within MemoryAgentBench (36.33) is where the remaining headroom
+is.** It is a different setting from the standalone benchmark, where RAW-RAG
 reaches 87.53: there each example has an isolated store and a question date to
 filter on, while here 60 questions share one pool of 111 sessions including other
-questions' distractors. Even allowing for that, 11.00 is low, and it is the
-single clearest thing to improve in this repository.
+questions' distractors. Two things are visibly left on the table. The retrieval
+query is sent as the raw question text, which begins `Current Date: 2023/05/27
+(Sat) 22:54, Now Answer the Question:` — boilerplate that is a third of the
+string and dilutes the embedding. And the session timestamp is kept in each
+window's text but never written to memory metadata, so it cannot be filtered or
+ordered on. Both are fixable without any extra model call, and both are left
+undone here rather than reported as done.
 
-#### Half of these sources are not measurable in one run
-
-| Stable to ≤1 point | Swings 8 points or more |
-|---|---|
-| `ruler_qa1`, `ruler_qa2`, all five `icl_*`, `factconsolidation_sh`/`_mh` | `eventqa` (11.6), `longmemeval` (8.3), `detective_qa` (22.5) |
-
-The split tracks the metric, not the system. The stable sources have short
-factual golds — an entity, a numeric label — graded by exact or boundary match.
-The unstable ones ask the reader to generate freely and then grade loosely:
-EventQA scores a 45-character narrative continuation by containment, and
-DetectiveQA is a near-chance multiple choice over a novel whose decisive clue is
-rarely among 15 retrieved passages. The published figures are single runs too, so
-comparisons at this granularity should be read as indicative rather than
-decisive.
 
 ### BEAM-1M
 

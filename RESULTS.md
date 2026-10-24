@@ -107,28 +107,28 @@ in-context sources first and then weights that against ReDial equally.
 
 | Capability | N | GoodMem | RAW-RAG | Verdict | Errors |
 |---|---:|---:|---:|---|---:|
-| Accurate Retrieval | 1000 | 54.10 | 67.85 | behind (-13.75) | 0 |
+| Accurate Retrieval | 1000 | 71.48 | 67.85 | ahead (+3.63) | 0 |
 | Test-Time Learning | 700 | 46.35 | 47.68 | behind (-1.33) | 0 |
-| Long-Range Understanding | 171 | 18.31 | 31.74 | behind (-13.43) | 0 |
+| Long-Range Understanding | 171 | 36.43 | 31.74 | ahead (+4.69) | 0 |
 | Conflict Resolution | 200 | 51.50 | 46.00 | ahead (+5.50) | 0 |
-| **Overall** (mean of four) | 2071 | **42.56** | 48.32 | behind (-5.75) | — |
+| **Overall** (mean of four) | 2071 | **51.44** | 48.32 | ahead (+3.12) | — |
 
 ### By source
 
 | Capability | Source | N | Accuracy | Errors |
 |---|---|---:|---:|---:|
-| Accurate Retrieval | `ruler_qa1` | 100 | 88.00 | 0 |
+| Accurate Retrieval | `ruler_qa1` | 100 | 87.00 | 0 |
 | Accurate Retrieval | `ruler_qa2` | 100 | 69.00 | 0 |
-| Accurate Retrieval | `eventqa` | 500 | 48.40 | 0 |
-| Accurate Retrieval | `longmemeval` | 300 | 11.00 | 0 |
+| Accurate Retrieval | `eventqa` | 500 | 93.60 | 0 |
+| Accurate Retrieval | `longmemeval` | 300 | 36.33 | 0 |
 | Test-Time Learning | `recsys_redial` | 200 | 20.50 | 0 |
 | Test-Time Learning | `icl_banking77` | 100 | 87.00 | 0 |
 | Test-Time Learning | `icl_clinic150` | 100 | 86.00 | 0 |
 | Test-Time Learning | `icl_nlu` | 100 | 86.00 | 0 |
 | Test-Time Learning | `icl_trec_coarse` | 100 | 61.00 | 0 |
 | Test-Time Learning | `icl_trec_fine` | 100 | 41.00 | 0 |
-| Long-Range Understanding | `infbench_sum` | 100 | 0.00 | 0 |
-| Long-Range Understanding | `detective_qa` | 71 | 36.62 | 0 |
+| Long-Range Understanding | `infbench_sum` | 100 | 2.44 | 0 |
+| Long-Range Understanding | `detective_qa` | 71 | 70.42 | 0 |
 | Conflict Resolution | `factconsolidation_mh` | 100 | 9.00 | 0 |
 | Conflict Resolution | `factconsolidation_sh` | 100 | 94.00 | 0 |
 

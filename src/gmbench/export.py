@@ -111,6 +111,27 @@ def run(config: RunConfig) -> list[Artifact]:
             )
         )
 
+    # MemoryAgentBench runs write one summary and one outcomes shard per
+    # capability rather than the LoCoMo answer/judge pair, so they are picked up
+    # by shape. Without this, `gmbench export` reported "nothing to export" on a
+    # finished MAB run and its evidence had to be copied by hand.
+    for summary in sorted(config.run_dir.glob("mab-*-summary-*.json")):
+        target = out_dir / summary.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(summary, target)
+        artifacts.append(
+            Artifact(target, target.stat().st_size, "capability scores and per-source detail")
+        )
+    for outcomes in sorted(config.run_dir.glob("mab-*-gpt-*.jsonl")):
+        target = out_dir / f"outcomes-{model}.jsonl.gz"
+        artifacts.append(
+            Artifact(
+                target,
+                _gzip_copy(outcomes, target),
+                "every question, its retrieved units, prediction and grade",
+            )
+        )
+
     if records_path(config).exists():
         target = out_dir / "retrieval-index.jsonl.gz"
         artifacts.append(
