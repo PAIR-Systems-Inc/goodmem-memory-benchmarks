@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from gmbench.client import RetrievedChunk
+from gmbench.client import GoodMemError, RetrievedChunk
 from gmbench.coverage import compute
 from gmbench.judge import JudgeRecord, accuracy_by_category, parse_label
 from gmbench.locomo import Conversation, Question, Turn, load
@@ -117,11 +117,11 @@ def test_expand_clamps_at_conversation_edges() -> None:
     assert [t.turn_index for t in turns] == [0, 1, 2]
 
 
-def test_expand_ignores_chunks_without_a_known_turn() -> None:
+def test_expand_rejects_a_dia_id_the_dataset_does_not_have() -> None:
+    """An unresolvable selection means index and dataset disagree, so it must fail."""
     conversation = _conversation([_turn(i) for i in range(3)])
-    selected, turns = expand(conversation, _ids("D9:99", "D1:2"), radius=0)
-    assert selected == ["D1:2"]
-    assert [t.dia_id for t in turns] == ["D1:2"]
+    with pytest.raises(GoodMemError, match="disagree"):
+        expand(conversation, _ids("D9:99", "D1:2"), radius=0)
 
 
 def test_render_context_marks_session_breaks_and_gaps() -> None:
@@ -134,14 +134,22 @@ def test_render_context_marks_session_breaks_and_gaps() -> None:
 # -- coverage ------------------------------------------------------------
 
 
-def _record(gold: tuple[str, ...], context: list[str], selected: list[str]) -> RetrievalRecord:
+def _record(
+    gold: tuple[str, ...],
+    context: list[str],
+    selected: list[str],
+    *,
+    qid: str = "q",
+    unresolvable: tuple[str, ...] = (),
+) -> RetrievalRecord:
     return RetrievalRecord(
-        qid="q",
+        qid=qid,
         conversation_id="conv-test",
         category=1,
         question="?",
         answer="a",
         gold_evidence=gold,
+        gold_unresolvable=unresolvable,
         selected_dia_ids=selected,
         context_dia_ids=context,
         context="x" * 10,
@@ -150,9 +158,9 @@ def _record(gold: tuple[str, ...], context: list[str], selected: list[str]) -> R
 
 def test_coverage_separates_full_partial_and_recall() -> None:
     records = [
-        _record(("D1:1", "D1:2"), ["D1:1", "D1:2"], ["D1:1"]),  # full
-        _record(("D1:1", "D1:2"), ["D1:1"], ["D1:1"]),  # partial, recall 0.5
-        _record(("D1:9",), ["D1:1"], ["D1:1"]),  # miss
+        _record(("D1:1", "D1:2"), ["D1:1", "D1:2"], ["D1:1"], qid="a"),  # full
+        _record(("D1:1", "D1:2"), ["D1:1"], ["D1:1"], qid="b"),  # partial, recall 0.5
+        _record(("D1:9",), ["D1:1"], ["D1:1"], qid="c"),  # miss
     ]
     overall = compute(records)[-1]
     assert overall.label == "overall"
@@ -163,9 +171,25 @@ def test_coverage_separates_full_partial_and_recall() -> None:
 
 
 def test_coverage_ignores_questions_without_annotated_evidence() -> None:
-    records = [_record((), ["D1:1"], ["D1:1"]), _record(("D1:1",), ["D1:1"], ["D1:1"])]
+    records = [
+        _record((), ["D1:1"], ["D1:1"], qid="a"),
+        _record(("D1:1",), ["D1:1"], ["D1:1"], qid="b"),
+    ]
     overall = compute(records)[-1]
     assert overall.questions == 1
+    assert overall.excluded == 0
+    assert overall.full_coverage == pytest.approx(100.0)
+
+
+def test_coverage_excludes_rather_than_penalises_unresolvable_evidence() -> None:
+    """A reference absent from its own conversation is the dataset's defect."""
+    records = [
+        _record(("D1:1",), ["D1:1"], ["D1:1"], qid="a"),
+        _record((), ["D1:1"], ["D1:1"], qid="b", unresolvable=("D9:99",)),
+    ]
+    overall = compute(records)[-1]
+    assert overall.questions == 1, "the unresolvable question must not be scored"
+    assert overall.excluded == 1, "and must be counted as an exclusion"
     assert overall.full_coverage == pytest.approx(100.0)
 
 
@@ -237,9 +261,15 @@ def test_accuracy_averages_repetitions_then_questions() -> None:
     assert result["overall"][1] == pytest.approx(100 * (1 + 1 / 3) / 3)
 
 
-def test_ranked_dia_ids_preserves_order_and_drops_unlabelled() -> None:
-    chunks = [_chunk("D1:3"), RetrievedChunk("m", "t", 0, 0.5, {}), _chunk("D1:1")]
-    assert ranked_dia_ids(chunks) == ["D1:3", "D1:1"]
+def test_ranked_dia_ids_preserves_rank_order() -> None:
+    assert ranked_dia_ids([_chunk("D1:3"), _chunk("D1:1")]) == ["D1:3", "D1:1"]
+
+
+def test_ranked_dia_ids_rejects_a_chunk_with_no_dia_id() -> None:
+    """Silently dropping one would shrink the evidence with nothing to explain it."""
+    chunks = [_chunk("D1:3"), RetrievedChunk("m", "t", 0, 0.5, {})]
+    with pytest.raises(GoodMemError, match="no dia_id"):
+        ranked_dia_ids(chunks)
 
 
 def test_retrieval_record_round_trips_through_json() -> None:
@@ -297,3 +327,417 @@ def test_rate_limiter_per_minute_converts_the_budget() -> None:
     limiter = RateLimiter.per_minute(1500)
     assert limiter.enabled
     assert limiter._interval == pytest.approx(60.0 / 1500)
+
+
+# -- completeness gates --------------------------------------------------
+
+
+def test_completeness_accepts_an_exact_cover() -> None:
+    from gmbench import validate
+
+    report = validate.check("read", ["a", "b"], ["b", "a"])
+    assert report.ok
+    validate.require("read", ["a", "b"], ["b", "a"])
+
+
+def test_completeness_catches_a_short_file() -> None:
+    """A short shard is the dangerous case: it looks exactly like a complete one."""
+    from gmbench import validate
+
+    report = validate.check("read", ["a", "b", "c"], ["a", "b"])
+    assert not report.ok
+    assert report.missing == ("c",)
+    with pytest.raises(validate.IncompleteStageError, match="1 missing: c"):
+        validate.require("read", ["a", "b", "c"], ["a", "b"])
+
+
+def test_completeness_catches_duplicates_and_strangers() -> None:
+    from gmbench import validate
+
+    report = validate.check("judge", ["a", "b"], ["a", "a", "b", "z"])
+    assert report.duplicated == ("a",)
+    assert report.unexpected == ("z",)
+    assert not report.ok
+
+
+# -- resumable shards ----------------------------------------------------
+
+
+def test_shard_writer_flushes_each_row(tmp_path) -> None:
+    """Rows must be on disk as they land, not at the end of the stage."""
+    from gmbench import jsonl
+
+    path = tmp_path / "shard.jsonl"
+    with jsonl.ShardWriter(path) as shard:
+        shard.write({"qid": "a", "v": 1})
+        # Readable from another handle before the writer closes.
+        assert [row["qid"] for row in jsonl.read_rows(path)] == ["a"]
+        shard.write({"qid": "b", "v": 2})
+    assert jsonl.completed_keys(path) == {"a", "b"}
+
+
+def test_shard_writer_appends_so_a_restart_resumes(tmp_path) -> None:
+    from gmbench import jsonl
+
+    path = tmp_path / "shard.jsonl"
+    with jsonl.ShardWriter(path) as shard:
+        shard.write({"qid": "a"})
+    with jsonl.ShardWriter(path) as shard:
+        shard.write({"qid": "b"})
+    assert jsonl.completed_keys(path) == {"a", "b"}
+
+
+def test_read_rows_tolerates_a_torn_final_line(tmp_path) -> None:
+    """A half-written last row is what an interrupted run leaves behind."""
+    from gmbench import jsonl
+
+    path = tmp_path / "shard.jsonl"
+    path.write_text('{"qid": "a"}\n{"qid": "b"}\n{"qid": "c", "ge')
+    assert [row["qid"] for row in jsonl.read_rows(path)] == ["a", "b"]
+
+
+def test_read_rows_rejects_corruption_that_is_not_a_torn_tail(tmp_path) -> None:
+    from gmbench import jsonl
+
+    path = tmp_path / "shard.jsonl"
+    path.write_text('{"qid": "a"}\nnot json at all\n{"qid": "c"}\n')
+    with pytest.raises(ValueError, match="corrupt row at line 2"):
+        list(jsonl.read_rows(path))
+
+
+# -- retrieval stream integrity ------------------------------------------
+
+
+def test_fatal_status_aborts_rather_than_degrading_the_score() -> None:
+    """A partial vector search must fail, not quietly return fewer chunks."""
+    from gmbench.client import _check_status
+
+    with pytest.raises(GoodMemError, match="VECTOR_SEARCH_PARTIAL"):
+        _check_status({"code": "VECTOR_SEARCH_PARTIAL", "message": "partial"})
+
+
+def test_unknown_status_is_treated_as_fatal() -> None:
+    """A warning the server learns to emit should stop a run, not be absorbed."""
+    from gmbench.client import _check_status
+
+    with pytest.raises(GoodMemError, match="unrecognised"):
+        _check_status({"code": "SOME_FUTURE_WARNING", "message": "hm"})
+
+
+def test_benign_status_passes() -> None:
+    from gmbench.client import _check_status
+
+    _check_status({"code": "FEATURE_DISABLED", "message": "no llm configured"})
+
+
+def test_chunk_with_an_out_of_range_memory_index_is_rejected() -> None:
+    from gmbench.client import _to_chunk
+
+    with pytest.raises(GoodMemError, match="memory index"):
+        _to_chunk({"memoryIndex": 3, "chunk": {}}, [{"memoryId": "m"}])
+
+
+def test_malformed_event_frame_is_rejected() -> None:
+    """Skipping a frame loses a retrieved item and lowers coverage unexplained."""
+    from gmbench.client import _iter_sse_data
+
+    with pytest.raises(GoodMemError, match="malformed event frame"):
+        list(_iter_sse_data(iter(["data: {not json"])))
+
+
+# -- result-set framing --------------------------------------------------
+
+
+def _sse(events: list[dict]) -> list[str]:
+    import json as _json
+
+    return [f"data: {_json.dumps(event)}" for event in events]
+
+
+def _fake_stream(monkeypatch, events: list[dict]):
+    """Points a client's retrieve at a canned event stream."""
+    import contextlib
+
+    from gmbench.client import GoodMemClient
+
+    client = GoodMemClient("https://example.invalid", "key", tls_verify=False)
+
+    class _Response:
+        status_code = 200
+        text = ""
+
+        def iter_lines(self):
+            return iter(_sse(events))
+
+        def read(self):
+            return b""
+
+    @contextlib.contextmanager
+    def _stream(*args, **kwargs):
+        yield _Response()
+
+    monkeypatch.setattr(client._client, "stream", _stream)
+    return client
+
+
+def _begin(set_id: str, expected: int) -> dict:
+    return {
+        "resultSetBoundary": {
+            "resultSetId": set_id,
+            "kind": "BEGIN",
+            "stageName": "rerank",
+            "expectedItems": expected,
+        }
+    }
+
+
+def _end(set_id: str) -> dict:
+    # The server names the stage only on BEGIN; END carries an empty stageName.
+    return {"resultSetBoundary": {"resultSetId": set_id, "kind": "END", "stageName": ""}}
+
+
+def _memory(dia_id: str) -> dict:
+    return {"memoryDefinition": {"memoryId": f"m-{dia_id}", "metadata": {"dia_id": dia_id}}}
+
+
+def _item(set_id: str, index: int, dia_id: str) -> dict:
+    return {
+        "retrievedItem": {
+            "chunk": {
+                "resultSetId": set_id,
+                "chunk": {"memoryId": f"m-{dia_id}", "chunkText": dia_id},
+                "memoryIndex": index,
+                "relevanceScore": 0.9,
+            }
+        }
+    }
+
+
+def test_retrieve_accepts_a_complete_result_set(monkeypatch) -> None:
+    """END carries no stage name, so the close must be matched by result-set id."""
+    client = _fake_stream(
+        monkeypatch,
+        [
+            _begin("rs-1", 2),
+            _memory("D1:1"),
+            _item("rs-1", 0, "D1:1"),
+            _memory("D1:2"),
+            _item("rs-1", 1, "D1:2"),
+            _end("rs-1"),
+        ],
+    )
+    chunks = client.retrieve(
+        "q", "space", dense_candidates=8, final_k=2, reranker_id="rr"
+    )
+    assert [chunk.metadata["dia_id"] for chunk in chunks] == ["D1:1", "D1:2"]
+
+
+def test_retrieve_rejects_a_truncated_stream(monkeypatch) -> None:
+    """A stream cut short would otherwise return a plausible, shorter result set."""
+    client = _fake_stream(
+        monkeypatch, [_begin("rs-1", 2), _memory("D1:1"), _item("rs-1", 0, "D1:1")]
+    )
+    with pytest.raises(GoodMemError, match="truncated"):
+        client.retrieve("q", "space", dense_candidates=8, final_k=2, reranker_id="rr")
+
+
+def test_retrieve_rejects_a_short_delivery(monkeypatch) -> None:
+    """The server states how many items to expect, so a shortfall is detectable."""
+    client = _fake_stream(
+        monkeypatch,
+        [_begin("rs-1", 3), _memory("D1:1"), _item("rs-1", 0, "D1:1"), _end("rs-1")],
+    )
+    with pytest.raises(GoodMemError, match="promised 3 items but delivered 1"):
+        client.retrieve("q", "space", dense_candidates=8, final_k=3, reranker_id="rr")
+
+
+def test_retrieve_rejects_a_missing_rerank_stage(monkeypatch) -> None:
+    """Without reranking the results are dense-only and not comparable."""
+    client = _fake_stream(
+        monkeypatch,
+        [
+            {
+                "resultSetBoundary": {
+                    "resultSetId": "rs-9",
+                    "kind": "BEGIN",
+                    "stageName": "vector-search",
+                    "expectedItems": 1,
+                }
+            },
+            _memory("D1:1"),
+            _item("rs-9", 0, "D1:1"),
+            _end("rs-9"),
+        ],
+    )
+    with pytest.raises(GoodMemError, match="no rerank stage"):
+        client.retrieve("q", "space", dense_candidates=8, final_k=1, reranker_id="rr")
+
+
+# -- MemoryAgentBench selection and unit splitting -----------------------
+
+MAB_DIR = Path(__file__).resolve().parents[1] / "data" / "memoryagentbench"
+needs_mab = pytest.mark.skipif(
+    not (MAB_DIR / "data").exists(), reason="MemoryAgentBench not present"
+)
+
+
+def test_base_source_strips_length_variants() -> None:
+    """22 shipped labels collapse to 14 sources; getting this wrong over-reports."""
+    from gmbench.memoryagentbench import base_source
+
+    assert base_source("eventqa_131072") == "eventqa"
+    assert base_source("eventqa_full") == "eventqa"
+    assert base_source("factconsolidation_sh_262k") == "factconsolidation_sh"
+    assert base_source("factconsolidation_mh_6k") == "factconsolidation_mh"
+    assert base_source("ruler_qa1_197K") == "ruler_qa1"
+    assert base_source("longmemeval_s*") == "longmemeval"
+    assert base_source("icl_banking77_5900shot_balance") == "icl_banking77"
+    assert base_source("recsys_redial_full") == "recsys_redial"
+    assert base_source("infbench_sum_eng_shots2") == "infbench_sum"
+    assert base_source("detective_qa") == "detective_qa"
+
+
+@needs_mab
+def test_selection_reproduces_the_published_question_count() -> None:
+    """One length variant per source is what sums to the paper's 2,071."""
+    from gmbench import memoryagentbench as mab
+
+    blocks = mab.load(MAB_DIR)
+    assert mab.question_total(blocks) == 2071
+    by_capability: dict[str, int] = {}
+    for block in blocks:
+        by_capability[block.capability] = by_capability.get(block.capability, 0) + len(
+            block.tasks
+        )
+    assert by_capability == {
+        "accurate_retrieval": 1000,
+        "test_time_learning": 700,
+        "long_range_understanding": 171,
+        "conflict_resolution": 200,
+    }
+    assert len(mab.composition(blocks)) == 14, "all 14 sources must be present"
+
+
+def test_fact_units_keep_their_serial_as_precedence() -> None:
+    """Conflict resolution depends on the serial, so it must survive splitting."""
+    from gmbench.memoryagentbench import UNIT_FACT, Block
+
+    block = Block(
+        block_id="b",
+        label="factconsolidation_sh_6k",
+        source="factconsolidation_sh",
+        capability="conflict_resolution",
+        unit_kind=UNIT_FACT,
+        context=(
+            "Here is a list of facts:\n"
+            "0. goaltender is associated with the sport of ice hockey.\n"
+            "1. Something unrelated.\n"
+            "310. goaltender is associated with the sport of pesapallo.\n"
+        ),
+        tasks=(),
+    )
+    units = block.units()
+    assert [u.serial for u in units] == [0, 1, 310]
+    assert units[0].metadata["serial"] == 0
+    # The serial stays in the text too, since the reader needs to see precedence.
+    assert units[2].text.startswith("310.")
+
+
+def test_demonstration_units_never_split_an_example_from_its_label() -> None:
+    from gmbench.memoryagentbench import UNIT_DEMONSTRATION, Block
+
+    block = Block(
+        block_id="b",
+        label="icl_banking77_5900shot_balance",
+        source="icl_banking77",
+        capability="test_time_learning",
+        unit_kind=UNIT_DEMONSTRATION,
+        context="utterance one\nlabel: 7\n\nutterance two\nlabel: 12\n",
+        tasks=(),
+    )
+    units = block.units()
+    assert len(units) == 2
+    assert all("label:" in unit.text for unit in units)
+
+
+def test_session_splitting_handles_the_flat_alternating_shape() -> None:
+    """The released context alternates stamp, turns — not a list of pairs.
+
+    Read as pairs, the timestamp string is iterated character by character and
+    the store fills with single letters: populated-looking and useless.
+    """
+    from gmbench.memoryagentbench import UNIT_SESSION, Block
+
+    context = repr(
+        [
+            "Chat Time: 2022/11/17 (Thu) 12:04",
+            [{"role": "user", "content": "hello there"}],
+            "Chat Time: 2022/11/18 (Fri) 09:00",
+            [{"role": "assistant", "content": "hi back"}],
+        ]
+    )
+    block = Block(
+        block_id="b",
+        label="longmemeval_s*",
+        source="longmemeval",
+        capability="accurate_retrieval",
+        unit_kind=UNIT_SESSION,
+        context=context,
+        tasks=(),
+    )
+    units = block.units()
+    assert len(units) == 2
+    assert units[0].text.startswith("Chat Time: 2022/11/17")
+    assert "user: hello there" in units[0].text
+    assert "assistant: hi back" in units[1].text
+
+
+def test_session_splitting_falls_back_rather_than_returning_nothing() -> None:
+    from gmbench.memoryagentbench import UNIT_SESSION, Block
+
+    block = Block(
+        block_id="b",
+        label="longmemeval_s*",
+        source="longmemeval",
+        capability="accurate_retrieval",
+        unit_kind=UNIT_SESSION,
+        context="this is not a python literal at all",
+        tasks=(),
+    )
+    units = block.units()
+    assert len(units) == 1, "an unparseable context must not yield an empty store"
+
+
+# -- BEAM ----------------------------------------------------------------
+
+BEAM_FILE = (
+    Path(__file__).resolve().parents[1] / "data" / "beam" / "1M-00000-of-00001.parquet"
+)
+needs_beam = pytest.mark.skipif(not BEAM_FILE.exists(), reason="BEAM not present")
+
+
+@needs_beam
+def test_beam_paper_conversation_has_the_published_message_count() -> None:
+    from gmbench import beam
+
+    conversation = beam.load(BEAM_FILE)
+    assert len(conversation.messages) == beam.PAPER_MESSAGE_COUNT
+    # Ingestion order must be the dataset's own monotonic id.
+    indices = [message.index for message in conversation.messages]
+    assert indices == sorted(indices)
+    assert indices[0] == 0
+    assert len(set(indices)) == len(indices)
+    # Approaching one million tokens.
+    assert 800_000 < conversation.approximate_tokens < 1_200_000
+
+
+@needs_beam
+def test_beam_renders_the_session_anchor_only_where_present() -> None:
+    from gmbench import beam
+
+    conversation = beam.load(BEAM_FILE)
+    anchored = [m for m in conversation.messages if m.time_anchor]
+    assert len(anchored) == 10, "one anchor per session"
+    assert anchored[0].render().startswith("[March-01-2024] user:")
+    plain = next(m for m in conversation.messages if not m.time_anchor)
+    assert plain.render().startswith(f"{plain.role}:")

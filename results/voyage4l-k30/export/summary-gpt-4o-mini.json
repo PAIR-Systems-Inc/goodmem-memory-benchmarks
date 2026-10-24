@@ -1,0 +1,79 @@
+{
+  "benchmark": "locomo",
+  "run_tag": "voyage4l-k30",
+  "ingest_tag": "voyage4l-rerank25",
+  "reader_model": "gpt-4o-mini",
+  "judge_model": "gpt-4o-mini-2024-07-18",
+  "judge_repetitions": 3,
+  "embedder_id": "f5bffa40-1fec-4208-b864-6875de3d5078",
+  "reranker_id": "019ca540-98a8-75c9-806c-a079202ac71f",
+  "retrieval": {
+    "dense_candidates": 128,
+    "final_k": 30,
+    "neighbor_turns": 2,
+    "ef_search": 400,
+    "iterative_scan": "ITERATIVE_SCAN_RELAXED_ORDER"
+  },
+  "chunking": {
+    "chunk_size": 1500,
+    "chunk_overlap": 150,
+    "length_measurement": "CHARACTER_COUNT"
+  },
+  "evidence": {
+    "mean_chars": 19400.72987012987,
+    "mean_turns": 106.6077922077922
+  },
+  "integrity": {
+    "questions": 1540,
+    "reader_errors": 0,
+    "reader_truncated": 0,
+    "reader_missing_final_marker": 0,
+    "judge_infrastructure_failures": 0,
+    "judge_unparseable": 0,
+    "judgements_expected": 4620,
+    "judgements_present": 4620,
+    "clean": true,
+    "problems": []
+  },
+  "scores": [
+    {
+      "slice": "multi_hop",
+      "questions": 282,
+      "accuracy": 88.65248226950355,
+      "ci_low": 84.86997635933807,
+      "ci_high": 92.19858156028369
+    },
+    {
+      "slice": "open_domain",
+      "questions": 96,
+      "accuracy": 70.48611111111111,
+      "ci_low": 61.458333333333336,
+      "ci_high": 79.51388888888889
+    },
+    {
+      "slice": "single_hop",
+      "questions": 841,
+      "accuracy": 94.29250891795482,
+      "ci_low": 92.6674593737614,
+      "ci_high": 95.79865239793895
+    },
+    {
+      "slice": "temporal",
+      "questions": 321,
+      "accuracy": 78.6085150571132,
+      "ci_low": 74.03946002076843,
+      "ci_high": 82.86604361370716
+    },
+    {
+      "slice": "overall",
+      "questions": 1540,
+      "accuracy": 88.50649350649351,
+      "ci_low": 86.92640692640694,
+      "ci_high": 90.04329004329006
+    }
+  ],
+  "bootstrap": {
+    "resamples": 10000,
+    "seed": 20261023
+  }
+}

@@ -26,9 +26,12 @@ requests_per_second = 5.0
 llm_requests_per_second = 15.0
 
 [models]
-# Voyage 4 Large (1024d) and voyage-rerank-2.5, as registered on this instance.
-embedder_id = "f5bffa40-1fec-4208-b864-6875de3d5078"
-reranker_id = "019ca540-98a8-75c9-806c-a079202ac71f"
+# Registration UUIDs are per-instance, so they come from the environment:
+# GMBENCH_EMBEDDER_ID, GMBENCH_RERANKER_ID, GMBENCH_JUDGE_LLM_ID and
+# GMBENCH_READER_LLM_IDS. The run that produced the published numbers used
+# Voyage 4 Large (1024d) with voyage-rerank-2.5.
+embedder_id = ""
+reranker_id = ""
 # The paper runs every system through the same reader, so these are pinned to
 # appendix A.1.1: GPT-4o-mini and GPT-4.1-mini readers, GPT-4o-mini-2024-07-18
 # as judge at temperature zero with three judgements per answer.
@@ -39,11 +42,11 @@ judge_repetitions = 3
 
 # Reader and judge go through GoodMem's provider proxy, so the provider key
 # stays in the instance rather than in this process.
-judge_llm_id = "01a16c6d-b6ce-735b-9a33-abfdca00e0a9"
+judge_llm_id = ""
 
+# Populated from GMBENCH_READER_LLM_IDS in the form
+# "gpt-4o-mini=<uuid>,gpt-4.1-mini=<uuid>".
 [models.reader_llm_ids]
-"gpt-4o-mini" = "01a16c6d-b6ae-7388-8074-ace1e483938d"
-"gpt-4.1-mini" = "01a16c6d-b6c2-7220-a040-f916e935277f"
 
 [chunking]
 # Character counts, which is what GoodMem's splitter actually measures. One

@@ -22,6 +22,7 @@ class CoverageStats:
 
     label: str
     questions: int
+    excluded: int
     full_coverage: float
     partial_coverage: float
     evidence_recall: float
@@ -31,7 +32,13 @@ class CoverageStats:
 
 
 def _summarize(label: str, records: list[RetrievalRecord]) -> CoverageStats:
+    # Only questions with at least one reference this conversation actually
+    # contains can be scored. The rest are excluded and counted, rather than
+    # charged to retrieval as a miss.
     scored = [r for r in records if r.gold_evidence]
+    excluded = sum(
+        1 for r in records if not r.gold_evidence and r.gold_unresolvable
+    )
     full = partial = 0
     recall_sum = 0.0
     selected_hits = 0
@@ -50,6 +57,7 @@ def _summarize(label: str, records: list[RetrievalRecord]) -> CoverageStats:
     return CoverageStats(
         label=label,
         questions=len(scored),
+        excluded=excluded,
         full_coverage=100.0 * full / n,
         partial_coverage=100.0 * partial / n,
         evidence_recall=100.0 * recall_sum / n,
@@ -66,9 +74,10 @@ def compute(records: list[RetrievalRecord]) -> list[CoverageStats]:
       records: Retrieval records produced by the retrieve stage.
 
     Returns:
-      Per-category stats followed by an overall row. Categories without
-      annotated evidence (open-domain questions often have none) are reported
-      with a zero question count and should be read as not measurable this way.
+      Per-category stats followed by an overall row. ``questions`` counts the
+      questions that could be scored; ``excluded`` counts those whose only
+      annotated references are absent from their own conversation, which happens
+      a handful of times in the released dataset.
     """
     out: list[CoverageStats] = []
     for category in sorted({r.category for r in records}):

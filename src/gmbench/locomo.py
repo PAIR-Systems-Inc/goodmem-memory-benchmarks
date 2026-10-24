@@ -18,6 +18,23 @@ from pathlib import Path
 _SESSION_RE = re.compile(r"^session_(\d+)$")
 _DATE_FORMAT = "%I:%M %p on %d %B, %Y"
 
+# The composition of the 10-conversation release, by category. The paper
+# evaluates the four non-adversarial categories, which come to 1,540 questions;
+# category 5 is adversarial and excluded there. A file that does not match is a
+# different release, and a score measured on it would not be comparable.
+EXPECTED_CONVERSATIONS = 10
+EXPECTED_CATEGORY_COUNTS: dict[int, int] = {1: 282, 2: 321, 3: 96, 4: 841, 5: 446}
+EVALUATED_CATEGORIES: tuple[int, ...] = (1, 2, 3, 4)
+
+# A dialogue reference as the dataset defines it: session and turn.
+_DIA_ID_RE = re.compile(r"^D\d+:\d+$")
+# Six non-adversarial questions in the 10-conversation release pack several
+# references into one string, separated by spaces or semicolons, and two carry
+# references that are not recoverable at all ("D", "D:11:26"). Splitting the
+# first kind is safe; the second kind is recorded rather than guessed at, since
+# inventing a reference would silently change what coverage measures.
+_DIA_ID_SPLIT_RE = re.compile(r"[;,\s]+")
+
 CATEGORY_NAMES: dict[int, str] = {
     1: "multi_hop",
     2: "temporal",
@@ -61,6 +78,17 @@ class Question:
     answer: str
     category: int
     evidence: tuple[str, ...]
+    evidence_unparsed: tuple[str, ...] = ()
+
+    @property
+    def evidence_is_measurable(self) -> bool:
+        """True when at least one reference was recoverable.
+
+        A question whose entire evidence list is unparseable cannot be scored
+        for coverage. Treating it as a miss would understate retrieval for a
+        defect in the dataset rather than in the system under test.
+        """
+        return bool(self.evidence)
 
     @property
     def qid(self) -> str:
@@ -100,15 +128,67 @@ class Conversation:
     def by_turn_index(self) -> dict[int, Turn]:
         return {turn.turn_index: turn for turn in self.turns}
 
+    def resolvable_evidence(self, question: Question) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Splits a question's evidence into references this conversation has.
+
+        A handful of references in the released dataset point at turns that are
+        not in the conversation (three in the non-adversarial split). Scoring
+        those as retrieval misses would charge the system under test for someone
+        else's typo, so they are separated out and reported instead.
+
+        Args:
+          question: The question whose evidence to resolve.
+
+        Returns:
+          The references present in this conversation, and those absent from it.
+        """
+        known = self.by_dia_id
+        present = tuple(ref for ref in question.evidence if ref in known)
+        absent = tuple(ref for ref in question.evidence if ref not in known)
+        return present, absent
+
     def neighbors(self, turn_index: int, radius: int) -> list[Turn]:
         """Returns the turn at ``turn_index`` with up to ``radius`` turns either side."""
         lo, hi = turn_index - radius, turn_index + radius
         return [self.by_turn_index[i] for i in range(lo, hi + 1) if i in self.by_turn_index]
 
 
+class DatasetError(RuntimeError):
+    """Raised when the loaded dataset is not the release this harness expects."""
+
+
 def _parse_session_date(raw: str) -> datetime:
     """Parses a LoCoMo session timestamp such as ``1:56 pm on 8 May, 2023``."""
     return datetime.strptime(raw.strip(), _DATE_FORMAT)
+
+
+def _normalize_evidence(raw: object) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Splits evidence references, separating the recoverable from the rest.
+
+    Args:
+      raw: The dataset's ``evidence`` value, normally a list of strings.
+
+    Returns:
+      Well-formed dialogue references, and the residue that could not be parsed.
+    """
+    refs: list[str] = []
+    residue: list[str] = []
+    items = raw if isinstance(raw, (list, tuple)) else ([raw] if raw else [])
+    for item in items:
+        text = str(item).strip()
+        if not text:
+            continue
+        parts = [part for part in _DIA_ID_SPLIT_RE.split(text) if part]
+        for part in parts:
+            if _DIA_ID_RE.match(part):
+                refs.append(part)
+            else:
+                residue.append(part)
+    # Order-preserving de-duplication; a reference repeated across entries is
+    # one piece of required evidence, not two.
+    seen: set[str] = set()
+    unique = [ref for ref in refs if not (ref in seen or seen.add(ref))]
+    return tuple(unique), tuple(residue)
 
 
 def _answer_text(record: dict) -> str:
@@ -168,18 +248,23 @@ def load(path: Path, *, conversations: tuple[str, ...] = (), categories: tuple[i
 
         # The index is the question's position in the full, unfiltered question
         # list, so a category filter never renumbers the ids.
-        questions = tuple(
-            Question(
-                conversation_id=sample_id,
-                index=position,
-                question=qa["question"],
-                answer=_answer_text(qa),
-                category=int(qa["category"]),
-                evidence=tuple(qa.get("evidence") or ()),
+        questions: list[Question] = []
+        for position, qa in enumerate(record.get("qa", ())):
+            category = int(qa["category"])
+            if wanted_cats and category not in wanted_cats:
+                continue
+            refs, residue = _normalize_evidence(qa.get("evidence"))
+            questions.append(
+                Question(
+                    conversation_id=sample_id,
+                    index=position,
+                    question=qa["question"],
+                    answer=_answer_text(qa),
+                    category=category,
+                    evidence=refs,
+                    evidence_unparsed=residue,
+                )
             )
-            for position, qa in enumerate(record.get("qa", ()))
-            if not wanted_cats or int(qa["category"]) in wanted_cats
-        )
 
         out.append(
             Conversation(
@@ -187,8 +272,67 @@ def load(path: Path, *, conversations: tuple[str, ...] = (), categories: tuple[i
                 speaker_a=conv["speaker_a"],
                 speaker_b=conv["speaker_b"],
                 turns=tuple(turns),
-                questions=questions,
+                questions=tuple(questions),
             )
         )
 
+    _validate(out, filtered_conversations=bool(wanted_convs), filtered_categories=wanted_cats)
     return out
+
+
+def _validate(
+    conversations: list[Conversation],
+    *,
+    filtered_conversations: bool,
+    filtered_categories: frozenset[int],
+) -> None:
+    """Checks the loaded data against the release the paper evaluates.
+
+    Structural invariants are always checked. The published counts are only
+    checked on a full, unfiltered load, since a smoke run deliberately takes a
+    subset.
+
+    Raises:
+      DatasetError: If the data is internally inconsistent, or is a full load
+        that does not match the published composition.
+    """
+    for conversation in conversations:
+        dia_ids = [turn.dia_id for turn in conversation.turns]
+        if len(dia_ids) != len(set(dia_ids)):
+            raise DatasetError(
+                f"{conversation.conversation_id}: duplicate dialogue ids, so evidence "
+                "references would be ambiguous"
+            )
+        for question in conversation.questions:
+            if not question.answer.strip():
+                raise DatasetError(
+                    f"{question.qid}: no reference answer, which would be scored as a "
+                    "wrong answer rather than a missing one"
+                )
+
+    if filtered_conversations:
+        return
+    if len(conversations) != EXPECTED_CONVERSATIONS:
+        raise DatasetError(
+            f"expected {EXPECTED_CONVERSATIONS} conversations, loaded "
+            f"{len(conversations)}; this is not the 10-conversation release"
+        )
+
+    counts: dict[int, int] = {}
+    for conversation in conversations:
+        for question in conversation.questions:
+            counts[question.category] = counts.get(question.category, 0) + 1
+    # An unknown category in the filter means a release this check cannot speak
+    # to, so it stays quiet rather than failing on its own ignorance.
+    if filtered_categories and not filtered_categories <= set(EXPECTED_CATEGORY_COUNTS):
+        return
+    wanted = {
+        category: total
+        for category, total in EXPECTED_CATEGORY_COUNTS.items()
+        if not filtered_categories or category in filtered_categories
+    }
+    if counts != wanted:
+        raise DatasetError(
+            f"question counts {counts} do not match the published composition "
+            f"{wanted}; a score measured here would not be comparable"
+        )

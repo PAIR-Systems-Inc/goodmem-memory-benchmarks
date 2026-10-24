@@ -45,7 +45,14 @@ class ServerConfig:
 
 @dataclass(frozen=True, slots=True)
 class ModelConfig:
-    """GoodMem-side model registrations, by UUID, plus reader/judge model names."""
+    """GoodMem-side model registrations, by UUID, plus reader/judge model names.
+
+    The UUIDs are specific to one GoodMem instance, so they are supplied by
+    environment rather than committed. ``GMBENCH_EMBEDDER_ID``,
+    ``GMBENCH_RERANKER_ID``, ``GMBENCH_JUDGE_LLM_ID`` and
+    ``GMBENCH_READER_LLM_IDS`` (``model=uuid`` pairs, comma separated) override
+    whatever the run TOML carries.
+    """
 
     embedder_id: str = ""
     reranker_id: str = ""
@@ -152,6 +159,40 @@ class RunConfig:
         return self.results_dir / self.ingest_tag
 
 
+def _models_from(table: dict[str, Any]) -> ModelConfig:
+    """Builds the model config, letting the environment supply instance UUIDs."""
+    models: ModelConfig = _dataclass_from(ModelConfig, table)
+    overrides: dict[str, Any] = {}
+    for env_name, field in (
+        ("GMBENCH_EMBEDDER_ID", "embedder_id"),
+        ("GMBENCH_RERANKER_ID", "reranker_id"),
+        ("GMBENCH_JUDGE_LLM_ID", "judge_llm_id"),
+    ):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            overrides[field] = value
+
+    raw_readers = os.environ.get("GMBENCH_READER_LLM_IDS", "").strip()
+    if raw_readers:
+        pairs: list[tuple[str, str]] = []
+        for item in raw_readers.split(","):
+            if not item.strip():
+                continue
+            model, _, llm_id = item.partition("=")
+            if not llm_id:
+                raise ValueError(
+                    f"GMBENCH_READER_LLM_IDS entry {item!r} is not model=uuid"
+                )
+            pairs.append((model.strip(), llm_id.strip()))
+        overrides["reader_llm_ids"] = tuple(sorted(pairs))
+
+    if not overrides:
+        return models
+    fields = {name: getattr(models, name) for name in models.__dataclass_fields__}
+    fields.update(overrides)
+    return ModelConfig(**fields)
+
+
 def _dataclass_from(cls: type, table: dict[str, Any]) -> Any:
     """Builds a frozen dataclass from a TOML table, ignoring unknown keys."""
     fields = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
@@ -195,7 +236,7 @@ def load(path: Path, *, run_tag: str | None = None) -> RunConfig:
         dataset_path=dataset if dataset.is_absolute() else root / dataset,
         results_dir=results if results.is_absolute() else root / results,
         server=ServerConfig.from_env(doc.get("server", {})),
-        models=_dataclass_from(ModelConfig, doc.get("models", {})),
+        models=_models_from(doc.get("models", {})),
         chunking=_dataclass_from(ChunkingConfig, doc.get("chunking", {})),
         retrieval=_dataclass_from(RetrievalConfig, doc.get("retrieval", {})),
         ingest=_dataclass_from(IngestConfig, doc.get("ingest", {})),

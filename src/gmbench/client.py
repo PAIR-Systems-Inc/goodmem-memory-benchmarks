@@ -24,6 +24,36 @@ CHAT_POST_PROCESSOR = "com.goodmem.retrieval.postprocess.ChatPostProcessorFactor
 # Benchmark runs push thousands of requests through, so backing off correctly is
 # load-bearing rather than defensive.
 _RETRY_STATUS = frozenset({429, 502, 503, 504})
+
+# Any of these means the result set we were handed is not the result set we
+# asked for. Treating a partial or timed-out search as a normal answer is how a
+# benchmark ends up reporting a confident, wrong number, so they all abort.
+_FATAL_RETRIEVAL_STATUS = frozenset({
+    "EMBEDDER_FAILED",
+    "EMBEDDER_UNAVAILABLE",
+    "EMBEDDER_TIMEOUT",
+    "VECTOR_SEARCH_FAILED",
+    "VECTOR_SEARCH_PARTIAL",
+    "VECTOR_SEARCH_TIMEOUT",
+    "SPACE_INACCESSIBLE",
+    "SPACE_NOT_FOUND",
+    "SPACE_NO_EMBEDDERS",
+    "CHUNK_NOT_FOUND",
+    "MEMORY_LOAD_FAILED",
+    "MEMORY_CONTENT_UNAVAILABLE",
+    "RERANKING_FAILED",
+    "RATE_LIMITED",
+    "RESOURCE_EXHAUSTED",
+    "CONFIGURATION_ERROR",
+    "INVALID_ARGUMENT",
+    "NOT_FOUND",
+    "PERMISSION_DENIED",
+    "FAILED_PRECONDITION",
+})
+
+# Emitted when no LLM is configured on the post-processor, which is the normal
+# case here: this harness runs the reader itself.
+_BENIGN_RETRIEVAL_STATUS = frozenset({"FEATURE_DISABLED", "LLM_CAPABILITY_INFERRED"})
 _MAX_ATTEMPTS = 10
 _BASE_BACKOFF_SECONDS = 0.5
 _MAX_BACKOFF_SECONDS = 30.0
@@ -43,6 +73,25 @@ class GoodMemError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class Completion:
+    """One chat completion, with the stop reason kept.
+
+    ``finish_reason`` matters: a response truncated at the token cap still
+    arrives as a success, and for a chain-of-thought reader that silently drops
+    the final answer the grader is supposed to read.
+    """
+
+    text: str
+    finish_reason: str
+    prompt_tokens: int
+    completion_tokens: int
+
+    @property
+    def truncated(self) -> bool:
+        return self.finish_reason == "length"
+
+
+@dataclass(frozen=True, slots=True)
 class RetrievedChunk:
     """One reranked chunk plus the metadata of its parent memory."""
 
@@ -51,6 +100,7 @@ class RetrievedChunk:
     chunk_sequence_number: int
     relevance_score: float
     metadata: dict[str, Any]
+    result_set_id: str = ""
 
 
 class GoodMemClient:
@@ -236,7 +286,7 @@ class GoodMemClient:
         model: str,
         temperature: float | None = None,
         max_tokens: int | None = None,
-    ) -> str:
+    ) -> Completion:
         """Runs a chat completion through GoodMem's provider proxy.
 
         The proxy forwards to the registered upstream endpoint and injects the
@@ -252,10 +302,13 @@ class GoodMemClient:
           max_tokens: Completion token cap.
 
         Returns:
-          The assistant message content, or an empty string if absent.
+          The completion text together with its stop reason and token counts.
 
         Raises:
-          GoodMemError: If the proxy or the upstream provider rejects the call.
+          GoodMemError: If the proxy or the provider rejects the call, or the
+            response carries no content. Empty content is a failure rather than
+            an empty answer, because an empty answer would simply be graded
+            wrong and disappear into the score.
         """
         body: dict[str, Any] = {"model": model, "messages": messages}
         if temperature is not None:
@@ -280,7 +333,20 @@ class GoodMemClient:
             choices = payload.get("choices") or []
             if not choices:
                 raise GoodMemError(f"chat_completion({model}) returned no choices")
-            return (choices[0].get("message") or {}).get("content") or ""
+            choice = choices[0]
+            text = (choice.get("message") or {}).get("content") or ""
+            if not text.strip():
+                raise GoodMemError(
+                    f"chat_completion({model}) returned empty content "
+                    f"(finish_reason={choice.get('finish_reason')!r})"
+                )
+            usage = payload.get("usage") or {}
+            return Completion(
+                text=text,
+                finish_reason=str(choice.get("finish_reason") or ""),
+                prompt_tokens=int(usage.get("prompt_tokens") or 0),
+                completion_tokens=int(usage.get("completion_tokens") or 0),
+            )
 
         return self._with_retries(
             f"POST /v1/proxy/llms/{llm_id}/chat/completions", attempt, self._llm_limiter
@@ -357,11 +423,23 @@ class GoodMemClient:
         )
 
     def _collect_retrieval_once(self, body: dict[str, Any]) -> list[RetrievedChunk]:
-        """Streams one retrieve response and assembles the reranked result set."""
+        """Streams one retrieve response and assembles the reranked result set.
+
+        The server frames each result set as BEGIN, items, END and states how
+        many items to expect. Those are checked rather than trusted: a stream cut
+        short mid-flight would otherwise return a shorter, perfectly plausible
+        result set and quietly depress coverage.
+
+        Raises:
+          GoodMemError: If the stream reports a degraded search, is malformed,
+            ends before its END boundary, or delivers a different number of
+            reranked items than it promised.
+        """
         memories: list[dict[str, Any]] = []
         chunks: list[RetrievedChunk] = []
         rerank_set_id: str | None = None
-        vector_set_id: str | None = None
+        rerank_expected: int | None = None
+        rerank_closed = False
 
         with self._client.stream(
             "POST", "/v1/memories:retrieve", json=body, headers={"Accept": "text/event-stream"}
@@ -379,29 +457,93 @@ class GoodMemClient:
             for event in _iter_sse_data(response.iter_lines()):
                 if "resultSetBoundary" in event:
                     boundary = event["resultSetBoundary"]
-                    if boundary.get("kind") != "BEGIN":
-                        continue
-                    stage = boundary.get("stageName", "")
-                    if stage == "rerank":
-                        rerank_set_id = boundary.get("resultSetId")
-                    else:
-                        vector_set_id = boundary.get("resultSetId")
+                    set_id = boundary.get("resultSetId")
+                    if boundary.get("kind") == "BEGIN":
+                        if boundary.get("stageName") != "rerank":
+                            continue
+                        rerank_set_id = set_id
+                        expected = boundary.get("expectedItems")
+                        # Zero means "unspecified" in the wire contract.
+                        rerank_expected = int(expected) if expected else None
+                    elif set_id and set_id == rerank_set_id:
+                        # The server names the stage only on BEGIN, so the close
+                        # is matched by result-set id, which the wire contract
+                        # guarantees is shared by a set's boundaries and items.
+                        rerank_closed = True
                 elif "memoryDefinition" in event:
                     memories.append(event["memoryDefinition"])
                 elif "retrievedItem" in event:
                     item = event["retrievedItem"].get("chunk")
-                    if not item:
-                        continue
+                    if item is None:
+                        raise GoodMemError(
+                            "retrieved_item carried no chunk reference; this harness "
+                            "only requests chunk results"
+                        )
                     chunks.append(_to_chunk(item, memories))
                 elif "status" in event:
-                    code = event["status"].get("code")
-                    if code in {"RERANKING_FAILED", "EMBEDDER_FAILED", "VECTOR_SEARCH_FAILED"}:
-                        raise GoodMemError(f"retrieval degraded: {event['status']}")
+                    _check_status(event["status"])
 
         if rerank_set_id is None:
-            raise GoodMemError("retrieve returned no rerank stage; reranker did not run")
-        del vector_set_id
-        return [chunk for chunk in chunks if chunk.metadata.get("_result_set") == rerank_set_id]
+            raise GoodMemError(
+                "retrieve returned no rerank stage; the reranker did not run, so "
+                "results would be dense-only and not comparable"
+            )
+        if not rerank_closed:
+            raise GoodMemError(
+                "retrieve stream ended before the rerank result set was closed; "
+                "the response was truncated"
+            )
+
+        reranked = [chunk for chunk in chunks if chunk.result_set_id == rerank_set_id]
+        if rerank_expected is not None and len(reranked) != rerank_expected:
+            raise GoodMemError(
+                f"rerank stage promised {rerank_expected} items but delivered "
+                f"{len(reranked)}"
+            )
+        return reranked
+
+
+def _check_status(status: dict[str, Any]) -> None:
+    """Fails the request when the server reports a degraded result set.
+
+    Raises:
+      GoodMemError: If the status is a known degradation, or is unrecognised.
+    """
+    code = status.get("code", "")
+    if code in _BENIGN_RETRIEVAL_STATUS:
+        return
+    if code in _FATAL_RETRIEVAL_STATUS:
+        raise GoodMemError(f"retrieval degraded ({code}): {status.get('message', '')}")
+    # An unrecognised code is treated as fatal rather than ignored: a new
+    # warning the server learns to emit should stop a benchmark run, not be
+    # absorbed into a slightly lower score.
+    raise GoodMemError(f"unrecognised retrieval status ({code}): {status.get('message', '')}")
+
+
+def _to_chunk(item: dict[str, Any], memories: list[dict[str, Any]]) -> RetrievedChunk:
+    """Builds a chunk record, resolving its parent memory's metadata.
+
+    Raises:
+      GoodMemError: If the parent memory was not streamed before the item, which
+        would leave the chunk without the metadata every downstream stage keys
+        on.
+    """
+    chunk = item.get("chunk", {})
+    index = int(item.get("memoryIndex", -1))
+    if not 0 <= index < len(memories):
+        raise GoodMemError(
+            f"retrieved chunk referenced memory index {index} but only "
+            f"{len(memories)} memory definitions were streamed"
+        )
+    memory = memories[index]
+    return RetrievedChunk(
+        memory_id=chunk.get("memoryId", memory.get("memoryId", "")),
+        chunk_text=chunk.get("chunkText", ""),
+        chunk_sequence_number=int(chunk.get("chunkSequenceNumber", 0)),
+        relevance_score=float(item.get("relevanceScore", 0.0)),
+        metadata=dict(memory.get("metadata") or {}),
+        result_set_id=item.get("resultSetId", ""),
+    )
 
 
 class _Throttled(Exception):
@@ -433,24 +575,16 @@ def _backoff_seconds(attempt: int, retry_after: float | None) -> float:
     return min(_MAX_BACKOFF_SECONDS, exponential) * random.uniform(0.6, 1.4)
 
 
-def _to_chunk(item: dict[str, Any], memories: list[dict[str, Any]]) -> RetrievedChunk:
-    """Builds a chunk record, resolving its parent memory's metadata."""
-    chunk = item.get("chunk", {})
-    index = int(item.get("memoryIndex", -1))
-    memory = memories[index] if 0 <= index < len(memories) else {}
-    metadata = dict(memory.get("metadata") or {})
-    metadata["_result_set"] = item.get("resultSetId")
-    return RetrievedChunk(
-        memory_id=chunk.get("memoryId", memory.get("memoryId", "")),
-        chunk_text=chunk.get("chunkText", ""),
-        chunk_sequence_number=int(chunk.get("chunkSequenceNumber", 0)),
-        relevance_score=float(item.get("relevanceScore", 0.0)),
-        metadata=metadata,
-    )
-
-
 def _iter_sse_data(lines: Iterator[str]) -> Iterator[dict[str, Any]]:
-    """Yields decoded ``data:`` payloads from a server-sent event stream."""
+    """Yields decoded ``data:`` payloads from a server-sent event stream.
+
+    A frame that will not decode is raised rather than skipped. Skipping one
+    loses a retrieved item and lowers coverage by an amount nothing in the
+    output would explain.
+
+    Raises:
+      GoodMemError: If a data frame is not valid JSON.
+    """
     for line in lines:
         if not line.startswith("data:"):
             continue
@@ -459,5 +593,7 @@ def _iter_sse_data(lines: Iterator[str]) -> Iterator[dict[str, Any]]:
             continue
         try:
             yield json.loads(payload)
-        except json.JSONDecodeError:
-            continue
+        except json.JSONDecodeError as exc:
+            raise GoodMemError(
+                f"malformed event frame in retrieve stream: {payload[:200]}"
+            ) from exc

@@ -11,7 +11,6 @@ without saying anything about retrieval.
 
 from __future__ import annotations
 
-import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -20,6 +19,7 @@ from typing import Any
 
 from tqdm import tqdm
 
+from . import jsonl, validate
 from .client import GoodMemClient, GoodMemError
 from .config import RunConfig
 from .prompts import LOCOMO_READER
@@ -39,7 +39,22 @@ class AnswerRecord:
     answer: str
     generated: str
     final_answer: str
+    finish_reason: str = ""
     error: str | None = None
+
+    @property
+    def failed(self) -> bool:
+        """True when this answer is an infrastructure failure, not a model answer."""
+        return bool(self.error) or not self.generated.strip()
+
+    @property
+    def truncated(self) -> bool:
+        """True when generation stopped at the token cap.
+
+        A truncated chain of thought usually loses the FINAL ANSWER marker, so
+        the grader scores the reasoning instead of the answer.
+        """
+        return self.finish_reason == "length"
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -50,12 +65,14 @@ class AnswerRecord:
             "answer": self.answer,
             "generated": self.generated,
             "final_answer": self.final_answer,
+            "finish_reason": self.finish_reason,
             "error": self.error,
         }
 
     @classmethod
     def from_json(cls, raw: dict[str, Any]) -> "AnswerRecord":
-        return cls(**raw)
+        fields = {name for name in cls.__dataclass_fields__}
+        return cls(**{key: value for key, value in raw.items() if key in fields})
 
 
 def answers_path(config: RunConfig) -> Path:
@@ -82,16 +99,19 @@ def _answer_one(
     """
     prompt = LOCOMO_READER.format(context=record.context, question=record.question)
     generated = ""
+    finish_reason = ""
     error: str | None = None
     try:
-        generated = client.chat_completion(
+        completion = client.chat_completion(
             llm_id,
             [{"role": "user", "content": prompt}],
             model=config.models.reader_model,
             temperature=0.0,
             max_tokens=config.models.reader_max_tokens,
         )
-    except Exception as exc:  # noqa: BLE001 - recorded, then scored as a failure
+        generated = completion.text
+        finish_reason = completion.finish_reason
+    except Exception as exc:  # noqa: BLE001 - recorded, surfaced by the report
         error = f"{type(exc).__name__}: {exc}"
 
     return AnswerRecord(
@@ -102,56 +122,82 @@ def _answer_one(
         answer=record.answer,
         generated=generated,
         final_answer=extract_final_answer(generated),
+        finish_reason=finish_reason,
         error=error,
     )
 
 
 def run(
-    client: GoodMemClient, config: RunConfig, records: list[RetrievalRecord]
+    client: GoodMemClient,
+    config: RunConfig,
+    records: list[RetrievalRecord],
+    *,
+    resume: bool = True,
 ) -> list[AnswerRecord]:
-    """Generates an answer per retrieval record and writes them to the run directory.
+    """Generates an answer per retrieval record, appending each as it lands.
 
     Args:
       client: Connected GoodMem client, used as the inference proxy.
       config: Active run configuration.
       records: Retrieval records to answer.
+      resume: Keep answers already on disk and only generate the remainder.
 
     Returns:
-      One answer record per input record, in input order.
+      One answer record per input record, ordered by question id.
 
     Raises:
       GoodMemError: If no LLM registration is configured for the reader model.
+      IncompleteStageError: If the finished shard does not cover every record.
     """
     try:
         llm_id = config.models.llm_id_for(config.models.reader_model)
     except KeyError as exc:
         raise GoodMemError(str(exc)) from exc
 
-    answers: list[AnswerRecord | None] = [None] * len(records)
     path = answers_path(config)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    already = jsonl.completed_keys(path) if resume else set()
+    if not resume and path.exists():
+        path.unlink()
+    todo = [record for record in records if record.qid not in already]
+    if already:
+        tqdm.write(f"read: resuming, {len(already)} answers already on disk")
 
-    with tqdm(total=len(records), desc=f"read:{config.models.reader_model}", unit="q") as bar:
-        with ThreadPoolExecutor(max_workers=config.reader_concurrency) as pool:
-            futures = {
-                pool.submit(_answer_one, client, config, llm_id, record): index
-                for index, record in enumerate(records)
-            }
-            for future in as_completed(futures):
-                answers[futures[future]] = future.result()
-                bar.update(1)
+    with jsonl.ShardWriter(path) as shard:
+        with tqdm(
+            total=len(todo), desc=f"read:{config.models.reader_model}", unit="q"
+        ) as bar:
+            with ThreadPoolExecutor(max_workers=config.reader_concurrency) as pool:
+                futures = [
+                    pool.submit(_answer_one, client, config, llm_id, record)
+                    for record in todo
+                ]
+                for future in as_completed(futures):
+                    shard.write(future.result().to_json())
+                    bar.update(1)
 
-    done = [answer for answer in answers if answer is not None]
-    with path.open("w") as handle:
-        for answer in done:
-            handle.write(json.dumps(answer.to_json()) + "\n")
-    return done
+    return load_answers(config, [record.qid for record in records])
 
 
-def load_answers(config: RunConfig) -> list[AnswerRecord]:
-    """Reads answers written by a previous reader stage."""
+def load_answers(
+    config: RunConfig, expected_qids: list[str] | None = None
+) -> list[AnswerRecord]:
+    """Reads answers written by a previous reader stage.
+
+    Args:
+      config: Active run configuration.
+      expected_qids: When given, the question ids the shard must cover exactly.
+
+    Returns:
+      Answers ordered by question id.
+
+    Raises:
+      GoodMemError: If the shard is absent.
+      IncompleteStageError: If it does not cover ``expected_qids`` exactly.
+    """
     path = answers_path(config)
     if not path.exists():
-        raise RuntimeError(f"no answers at {path}; run the read stage first")
-    with path.open() as handle:
-        return [AnswerRecord.from_json(json.loads(line)) for line in handle if line.strip()]
+        raise GoodMemError(f"no answers at {path}; run the read stage first")
+    answers = [AnswerRecord.from_json(row) for row in jsonl.read_rows(path)]
+    if expected_qids is not None:
+        validate.require("read", expected_qids, [answer.qid for answer in answers])
+    return sorted(answers, key=lambda answer: answer.qid)

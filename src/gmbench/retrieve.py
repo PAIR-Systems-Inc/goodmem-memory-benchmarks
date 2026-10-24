@@ -21,6 +21,7 @@ from tqdm import tqdm
 from .client import GoodMemClient, GoodMemError, RetrievedChunk
 from .config import RunConfig
 from .ingest import SpaceBinding
+from . import validate
 from .locomo import Conversation, Question, Turn
 
 
@@ -34,6 +35,7 @@ class RetrievalRecord:
     question: str
     answer: str
     gold_evidence: tuple[str, ...]
+    gold_unresolvable: tuple[str, ...]
     selected_dia_ids: list[str]
     context_dia_ids: list[str]
     context: str
@@ -47,6 +49,7 @@ class RetrievalRecord:
             "question": self.question,
             "answer": self.answer,
             "gold_evidence": list(self.gold_evidence),
+            "gold_unresolvable": list(self.gold_unresolvable),
             "selected_dia_ids": self.selected_dia_ids,
             "context_dia_ids": self.context_dia_ids,
             "context": self.context,
@@ -62,6 +65,7 @@ class RetrievalRecord:
             question=raw["question"],
             answer=raw["answer"],
             gold_evidence=tuple(raw.get("gold_evidence", ())),
+            gold_unresolvable=tuple(raw.get("gold_unresolvable", ())),
             selected_dia_ids=list(raw.get("selected_dia_ids", ())),
             context_dia_ids=list(raw.get("context_dia_ids", ())),
             context=raw.get("context", ""),
@@ -74,10 +78,25 @@ def records_path(config: RunConfig) -> Path:
 
 
 def ranked_dia_ids(chunks: list[RetrievedChunk]) -> list[str]:
-    """Pulls the dialogue id off each reranked chunk, preserving rank order."""
-    return [
-        dia_id for chunk in chunks if isinstance(dia_id := chunk.metadata.get("dia_id"), str)
-    ]
+    """Pulls the dialogue id off each reranked chunk, preserving rank order.
+
+    Every memory this harness writes carries a ``dia_id``, so one missing means
+    the space holds something this run did not put there. Dropping it quietly
+    would shrink the evidence for that question with nothing to show why.
+
+    Raises:
+      GoodMemError: If a reranked chunk carries no string ``dia_id``.
+    """
+    out: list[str] = []
+    for chunk in chunks:
+        dia_id = chunk.metadata.get("dia_id")
+        if not isinstance(dia_id, str) or not dia_id:
+            raise GoodMemError(
+                f"reranked chunk {chunk.memory_id} has no dia_id metadata; the "
+                "space may hold memories from another run"
+            )
+        out.append(dia_id)
+    return out
 
 
 def expand(
@@ -91,18 +110,28 @@ def expand(
       radius: Number of turns to include either side of each selection.
 
     Returns:
-      The dialogue ids that resolved to a known turn, in rank order, and the
-      expanded, de-duplicated turns in chronological order.
+      The selected dialogue ids in rank order, and the expanded, de-duplicated
+      turns in chronological order.
+
+    Raises:
+      GoodMemError: If a dialogue id is not present in the conversation.
     """
     selected: list[str] = []
     keep: dict[int, Turn] = {}
+    unknown: list[str] = []
     for dia_id in dia_ids:
         turn = conversation.by_dia_id.get(dia_id)
         if turn is None:
+            unknown.append(dia_id)
             continue
         selected.append(dia_id)
         for neighbor in conversation.neighbors(turn.turn_index, radius):
             keep[neighbor.turn_index] = neighbor
+    if unknown:
+        raise GoodMemError(
+            f"{conversation.conversation_id}: retrieved dialogue ids absent from the "
+            f"dataset: {unknown[:5]}; the index and the dataset disagree"
+        )
     ordered = [keep[index] for index in sorted(keep)]
     return selected, ordered
 
@@ -146,16 +175,23 @@ def _retrieve_one(
         iterative_scan=config.retrieval.iterative_scan,
         max_scan_tuples=config.retrieval.max_scan_tuples,
     )
+    if not chunks:
+        raise GoodMemError(
+            f"{question.qid}: retrieval returned no reranked chunks; an empty "
+            "context would be scored as a wrong answer rather than a failure"
+        )
     selected, turns = expand(
         conversation, ranked_dia_ids(chunks), config.retrieval.neighbor_turns
     )
+    gold, unresolvable = conversation.resolvable_evidence(question)
     return RetrievalRecord(
         qid=question.qid,
         conversation_id=question.conversation_id,
         category=question.category,
         question=question.question,
         answer=question.answer,
-        gold_evidence=question.evidence,
+        gold_evidence=gold,
+        gold_unresolvable=unresolvable,
         selected_dia_ids=selected,
         context_dia_ids=[turn.dia_id for turn in turns],
         context=render_context(turns),
@@ -218,10 +254,30 @@ def run(
     return records
 
 
-def load_records(config: RunConfig) -> list[RetrievalRecord]:
-    """Reads retrieval records written by a previous retrieve stage."""
+def load_records(
+    config: RunConfig, expected_qids: list[str] | None = None
+) -> list[RetrievalRecord]:
+    """Reads retrieval records written by a previous retrieve stage.
+
+    Args:
+      config: Active run configuration.
+      expected_qids: When given, the question ids the file must cover exactly.
+        A short file is otherwise indistinguishable from a complete one.
+
+    Returns:
+      The records, ordered by question id for determinism across stages.
+
+    Raises:
+      GoodMemError: If the file is absent.
+      IncompleteStageError: If it does not cover ``expected_qids`` exactly.
+    """
     path = records_path(config)
     if not path.exists():
         raise GoodMemError(f"no retrieval records at {path}; run the retrieve stage first")
     with path.open() as handle:
-        return [RetrievalRecord.from_json(json.loads(line)) for line in handle if line.strip()]
+        records = [
+            RetrievalRecord.from_json(json.loads(line)) for line in handle if line.strip()
+        ]
+    if expected_qids is not None:
+        validate.require("retrieve", expected_qids, [record.qid for record in records])
+    return sorted(records, key=lambda record: record.qid)

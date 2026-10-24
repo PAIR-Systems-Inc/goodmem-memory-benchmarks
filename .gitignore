@@ -1,8 +1,16 @@
 # Benchmark inputs and outputs are large and/or licensed separately.
 data/*
 !data/.gitkeep
+!data/README.md
+# Per-question shards are large and regenerable; the export directory holds the
+# small, committable evidence for a published run.
 results/*
 !results/.gitkeep
+!results/*/
+results/*/*
+!results/*/export/
+!results/*/export/*
+results/_archive/
 .env
 __pycache__/
 *.py[cod]

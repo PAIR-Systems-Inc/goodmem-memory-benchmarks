@@ -19,6 +19,7 @@ from typing import Any
 
 from tqdm import tqdm
 
+from . import jsonl, validate
 from .client import GoodMemClient, GoodMemError
 from .config import RunConfig
 from .locomo import CATEGORY_NAMES
@@ -43,6 +44,21 @@ class JudgeRecord:
     def mean_score(self) -> float:
         return sum(self.scores) / len(self.scores) if self.scores else 0.0
 
+    @property
+    def infrastructure_failures(self) -> int:
+        """Judgements that failed to reach the model at all.
+
+        The paper scores these zero and keeps them in the denominator, which
+        this harness matches so the number stays comparable. Counting them
+        separately is what stops an outage from passing as a low score.
+        """
+        return sum(1 for label in self.labels if label.startswith("ERROR:"))
+
+    @property
+    def unparseable(self) -> int:
+        """Judgements whose response carried no usable JSON label."""
+        return sum(1 for label in self.labels if label == "UNPARSEABLE")
+
     def to_json(self) -> dict[str, Any]:
         return {
             "qid": self.qid,
@@ -54,7 +70,8 @@ class JudgeRecord:
 
     @classmethod
     def from_json(cls, raw: dict[str, Any]) -> "JudgeRecord":
-        return cls(**raw)
+        fields = {name for name in cls.__dataclass_fields__}
+        return cls(**{key: value for key, value in raw.items() if key in fields})
 
 
 def judgements_path(config: RunConfig) -> Path:
@@ -114,8 +131,7 @@ def _judge_once(
                 {"role": "user", "content": prompt},
             ],
             model=config.models.judge_model,
-            temperature=0.0,
-        )
+        ).text
     except Exception as exc:  # noqa: BLE001 - scored zero, per the paper
         return 0, f"ERROR:{type(exc).__name__}"
 
@@ -140,44 +156,52 @@ def _judge_answer(
 
 
 def run(
-    client: GoodMemClient, config: RunConfig, answers: list[AnswerRecord]
+    client: GoodMemClient,
+    config: RunConfig,
+    answers: list[AnswerRecord],
+    *,
+    resume: bool = True,
 ) -> list[JudgeRecord]:
-    """Grades every answer and writes the judgements to the run directory.
+    """Grades every answer, appending each judgement set as it lands.
 
     Args:
       client: Connected GoodMem client, used as the inference proxy.
       config: Active run configuration.
       answers: Answers to grade.
+      resume: Keep judgements already on disk and only grade the remainder.
 
     Returns:
-      One judge record per answer.
+      One judge record per answer, ordered by question id.
 
     Raises:
       GoodMemError: If no judge LLM registration is configured.
+      IncompleteStageError: If the finished shard does not cover every answer.
     """
     if not config.models.judge_llm_id:
         raise GoodMemError("models.judge_llm_id is not configured")
 
-    records: list[JudgeRecord | None] = [None] * len(answers)
     path = judgements_path(config)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    total = len(answers) * config.models.judge_repetitions
+    already = jsonl.completed_keys(path) if resume else set()
+    if not resume and path.exists():
+        path.unlink()
+    todo = [answer for answer in answers if answer.qid not in already]
+    if already:
+        tqdm.write(f"judge: resuming, {len(already)} answers already graded")
 
-    with tqdm(total=total, desc=f"judge:{config.models.judge_model}", unit="j") as bar:
-        with ThreadPoolExecutor(max_workers=config.reader_concurrency) as pool:
-            futures = {
-                pool.submit(_judge_answer, client, config, answer): index
-                for index, answer in enumerate(answers)
-            }
-            for future in as_completed(futures):
-                records[futures[future]] = future.result()
-                bar.update(config.models.judge_repetitions)
+    reps = config.models.judge_repetitions
+    with jsonl.ShardWriter(path) as shard:
+        with tqdm(
+            total=len(todo) * reps, desc=f"judge:{config.models.judge_model}", unit="j"
+        ) as bar:
+            with ThreadPoolExecutor(max_workers=config.reader_concurrency) as pool:
+                futures = [
+                    pool.submit(_judge_answer, client, config, answer) for answer in todo
+                ]
+                for future in as_completed(futures):
+                    shard.write(future.result().to_json())
+                    bar.update(reps)
 
-    done = [record for record in records if record is not None]
-    with path.open("w") as handle:
-        for record in done:
-            handle.write(json.dumps(record.to_json()) + "\n")
-    return done
+    return load_judgements(config, [answer.qid for answer in answers])
 
 
 def accuracy_by_category(records: list[JudgeRecord]) -> dict[str, tuple[int, float]]:
@@ -205,10 +229,26 @@ def accuracy_by_category(records: list[JudgeRecord]) -> dict[str, tuple[int, flo
     return out
 
 
-def load_judgements(config: RunConfig) -> list[JudgeRecord]:
-    """Reads judgements written by a previous judge stage."""
+def load_judgements(
+    config: RunConfig, expected_qids: list[str] | None = None
+) -> list[JudgeRecord]:
+    """Reads judgements written by a previous judge stage.
+
+    Args:
+      config: Active run configuration.
+      expected_qids: When given, the question ids the shard must cover exactly.
+
+    Returns:
+      Judgements ordered by question id.
+
+    Raises:
+      GoodMemError: If the shard is absent.
+      IncompleteStageError: If it does not cover ``expected_qids`` exactly.
+    """
     path = judgements_path(config)
     if not path.exists():
-        raise RuntimeError(f"no judgements at {path}; run the judge stage first")
-    with path.open() as handle:
-        return [JudgeRecord.from_json(json.loads(line)) for line in handle if line.strip()]
+        raise GoodMemError(f"no judgements at {path}; run the judge stage first")
+    records = [JudgeRecord.from_json(row) for row in jsonl.read_rows(path)]
+    if expected_qids is not None:
+        validate.require("judge", expected_qids, [record.qid for record in records])
+    return sorted(records, key=lambda record: record.qid)

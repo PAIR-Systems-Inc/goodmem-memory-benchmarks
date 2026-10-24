@@ -6,6 +6,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .coverage import CoverageStats
+from .summary import Integrity, Score
 from .sweep import SweepCell
 
 # RAW-RAG, LoCoMo, text-embedding-3-small + Cohere Rerank-v3.5 (paper table 10).
@@ -58,6 +59,7 @@ def coverage_table(stats: list[CoverageStats], console: Console | None = None) -
     table = Table(title="Evidence coverage (annotated-evidence questions only)")
     table.add_column("Slice", style="bold")
     table.add_column("N", justify="right")
+    table.add_column("Excl", justify="right")
     table.add_column("Full", justify="right")
     table.add_column("Any", justify="right")
     table.add_column("Recall", justify="right")
@@ -70,6 +72,7 @@ def coverage_table(stats: list[CoverageStats], console: Console | None = None) -
         table.add_row(
             stat.label,
             str(stat.questions),
+            str(stat.excluded) if stat.excluded else "-",
             f"{stat.full_coverage:.2f}",
             f"{stat.partial_coverage:.2f}",
             f"{stat.evidence_recall:.2f}",
@@ -79,54 +82,101 @@ def coverage_table(stats: list[CoverageStats], console: Console | None = None) -
             style=style,
         )
     console.print(table)
+    if any(stat.excluded for stat in stats):
+        console.print(
+            "[dim]Excl: questions whose annotated evidence points only at turns "
+            "absent from their own conversation. They are dropped rather than "
+            "scored as retrieval misses.[/dim]"
+        )
+
+
+def integrity_panel(checks: Integrity, console: Console | None = None) -> None:
+    """States whether any scored zero was plumbing rather than judgement.
+
+    This prints before the accuracy table on purpose. A number that looks
+    reasonable but is partly made of failed requests is the failure mode worth
+    catching, and it is invisible in the accuracy table itself.
+    """
+    console = console or Console()
+    if checks.clean:
+        console.print(
+            f"[green]Integrity: clean[/green] — {checks.questions} questions, "
+            f"{checks.judgements_present} judgements, no reader or judge failures."
+        )
+        return
+    console.print("[bold red]Integrity: CONTAMINATED[/bold red]")
+    for problem in checks.problems():
+        console.print(f"  [red]•[/red] {problem}")
+    console.print(
+        "[yellow]Scores below include these as zeros. Re-run the affected stage "
+        "before quoting them.[/yellow]"
+    )
 
 
 def accuracy_table(
-    measured: dict[str, tuple[int, float]],
+    scores: list[Score],
     reader_model: str,
     console: Console | None = None,
 ) -> None:
-    """Prints measured accuracy against the paper's RAW-RAG and best-agentic rows.
+    """Prints measured accuracy, with intervals, against the published rows.
+
+    The interval is the point of this table. Differences of a point or two on
+    these slice sizes are inside sampling noise, and the published figures carry
+    comparable uncertainty of their own, so a bare delta invites reading a win
+    or a regression into nothing.
 
     Args:
-      measured: Category name to (question count, accuracy) from the judge stage.
+      scores: Per-slice scores with bootstrap intervals.
       reader_model: Reader model name, used to pick the comparison column.
       console: Optional console to print to.
     """
     console = console or Console()
     paper = PAPER_RAW_RAG.get(reader_model, {})
     agentic = PAPER_BEST_AGENTIC.get(reader_model, {})
+    by_slice = {score.slice: score for score in scores}
 
     table = Table(title=f"LoCoMo accuracy, reader={reader_model}")
     table.add_column("Category", style="bold")
     table.add_column("N", justify="right")
     table.add_column("GoodMem", justify="right")
-    table.add_column("Paper RAW-RAG", justify="right")
-    table.add_column("vs RAW-RAG", justify="right")
-    table.add_column("Best agentic", justify="right")
-    table.add_column("vs agentic", justify="right")
+    table.add_column("95% CI", justify="center")
+    table.add_column("RAW-RAG", justify="right")
+    table.add_column("vs", justify="right")
+    table.add_column("Agentic", justify="right")
+    table.add_column("Verdict")
 
     for key in _ROW_ORDER:
-        if key not in measured:
+        score = by_slice.get(key)
+        if score is None:
             continue
-        count, score = measured[key]
         reference = paper.get(key)
         best = agentic.get(key)
-        delta = f"{score - reference:+.2f}" if reference is not None else "-"
-        delta_style = ""
-        if reference is not None:
-            delta_style = "green" if score >= reference else "red"
+        if reference is None:
+            verdict, delta = "-", "-"
+        elif reference < score.ci_low:
+            verdict, delta = "[green]ahead[/green]", f"{score.accuracy - reference:+.2f}"
+        elif reference > score.ci_high:
+            verdict, delta = "[red]behind[/red]", f"{score.accuracy - reference:+.2f}"
+        else:
+            verdict = "[dim]tie (within noise)[/dim]"
+            delta = f"{score.accuracy - reference:+.2f}"
         table.add_row(
             key,
-            str(count),
-            f"{score:.2f}",
+            str(score.questions),
+            f"{score.accuracy:.2f}",
+            f"[{score.ci_low:.2f}, {score.ci_high:.2f}]",
             f"{reference:.2f}" if reference is not None else "-",
-            f"[{delta_style}]{delta}[/{delta_style}]" if delta_style else delta,
+            delta,
             f"{best:.2f}" if best is not None else "-",
-            f"{score - best:+.2f}" if best is not None else "-",
+            verdict,
             style="bold cyan" if key == "overall" else None,
         )
     console.print(table)
+    console.print(
+        "[dim]Verdict compares the published point estimate against our interval. "
+        "The published figures have their own uncertainty, which is not shown and "
+        "would widen every comparison further.[/dim]"
+    )
     if not paper:
         console.print(
             f"[yellow]No published RAW-RAG column for reader '{reader_model}'; "
