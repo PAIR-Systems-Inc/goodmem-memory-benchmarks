@@ -5,8 +5,16 @@
   "reader_model": "gpt-4o-mini",
   "judge_model": "gpt-4o-mini-2024-07-18",
   "judge_repetitions": 3,
-  "embedder_id": "f5bffa40-1fec-4208-b864-6875de3d5078",
-  "reranker_id": "019ca540-98a8-75c9-806c-a079202ac71f",
+  "embedder": {
+    "provider": "VOYAGE",
+    "model": "voyage-4-large",
+    "display_name": "Voyage 4 Large"
+  },
+  "reranker": {
+    "provider": "VOYAGE",
+    "model": "rerank-2.5",
+    "display_name": "voyage-rerank-2.5"
+  },
   "retrieval": {
     "dense_candidates": 128,
     "final_k": 30,
