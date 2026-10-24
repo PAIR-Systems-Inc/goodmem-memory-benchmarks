@@ -2,7 +2,7 @@
 
 Measuring [GoodMem](https://github.com/PAIR-Systems-Inc/goodmem) against the
 retrieval baseline from **[*Is Complex Agentic Memory Always Needed? Naive RAG Is
-Stronger Than We Thought*](docs/2610.30755v1.pdf)** (arXiv:2610.30755v1), on the
+Stronger Than We Thought*](https://arxiv.org/abs/2610.30755)** (arXiv:2610.30755v1), on the
 paper's own benchmarks, with the paper's own reader, prompts and grading rules.
 
 **The finding: parity.** On LoCoMo, GoodMem lands statistically indistinguishable
@@ -165,6 +165,10 @@ one — a 32-point swing from one misconfigured stage.
 | `gte-rerank-v2` (DashScope) | 83.3% |
 | *no reranking at all* | 75.0% |
 | `Qwen3-Reranker-4B`, self-hosted over vLLM | 16.7% |
+
+The evidence for that run is published too, under
+`results/paper-models-broken-reranker/export/` — the same pipeline, the same
+reader, the same judge, differing only in the reranker.
 
 Two things follow. If you serve a generative reranker yourself, verify it against
 labelled evidence before trusting it — a broken one is silent, since it returns
