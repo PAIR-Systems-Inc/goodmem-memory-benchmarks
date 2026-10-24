@@ -10,7 +10,6 @@ metadata so evidence can be scored and neighbouring turns recovered exactly.
 from __future__ import annotations
 
 import json
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, asdict
@@ -22,33 +21,9 @@ from tqdm import tqdm
 from .client import GoodMemClient, GoodMemError
 from .config import RunConfig
 from .locomo import Conversation, Turn
+from .ratelimit import RateLimiter
 
 SPACE_LABEL_KEY = "gmbench-run"
-
-
-class _RateLimiter:
-    """A shared token bucket that paces memory creation across worker threads.
-
-    The embedding provider counts one request per memory, so this is the knob
-    that keeps a bulk ingest under its requests-per-minute ceiling.
-    """
-
-    def __init__(self, per_minute: int) -> None:
-        self._interval = 60.0 / per_minute if per_minute > 0 else 0.0
-        self._lock = threading.Lock()
-        self._next_at = 0.0
-
-    def acquire(self, permits: int = 1) -> None:
-        """Blocks until ``permits`` requests may be issued."""
-        if self._interval <= 0.0:
-            return
-        with self._lock:
-            now = time.monotonic()
-            start = max(now, self._next_at)
-            self._next_at = start + self._interval * permits
-            delay = start - now
-        if delay > 0:
-            time.sleep(delay)
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,7 +118,7 @@ def _ingest_turns(
     binding: SpaceBinding,
     turns: list[Turn],
     progress: tqdm,
-    limiter: _RateLimiter,
+    limiter: RateLimiter,
 ) -> int:
     """Uploads the given turns of one conversation, in paced batches."""
     requests = [
@@ -220,7 +195,7 @@ def ingest(
       GoodMemError: If turns are still missing after the configured repair rounds.
     """
     del skip_populated
-    limiter = _RateLimiter(config.ingest.embed_requests_per_minute)
+    limiter = RateLimiter.per_minute(config.ingest.embed_requests_per_minute)
 
     for round_index in range(config.ingest.repair_rounds + 1):
         work: list[tuple[Conversation, SpaceBinding, list[Turn]]] = []

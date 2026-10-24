@@ -24,6 +24,7 @@ class ServerConfig:
     api_key: str = ""
     tls_verify: bool = False
     timeout_seconds: float = 300.0
+    requests_per_second: float = 5.0
 
     @classmethod
     def from_env(cls, table: dict[str, Any]) -> Self:
@@ -32,6 +33,9 @@ class ServerConfig:
             api_key=os.environ.get("GOODMEM_API_KEY", table.get("api_key", "")),
             tls_verify=_env_bool("GMBENCH_TLS_VERIFY", bool(table.get("tls_verify", False))),
             timeout_seconds=float(table.get("timeout_seconds", cls.timeout_seconds)),
+            requests_per_second=float(
+                table.get("requests_per_second", cls.requests_per_second)
+            ),
         )
 
 

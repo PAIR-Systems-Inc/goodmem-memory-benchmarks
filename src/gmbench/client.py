@@ -16,15 +16,21 @@ from typing import Any, Callable, Iterator, TypeVar
 
 import httpx
 
+from .ratelimit import RateLimiter
+
 CHAT_POST_PROCESSOR = "com.goodmem.retrieval.postprocess.ChatPostProcessorFactory"
 
 # The server rate-limits per principal and answers 429 with a Retry-After hint.
 # Benchmark runs push thousands of requests through, so backing off correctly is
 # load-bearing rather than defensive.
 _RETRY_STATUS = frozenset({429, 502, 503, 504})
-_MAX_ATTEMPTS = 8
+_MAX_ATTEMPTS = 10
 _BASE_BACKOFF_SECONDS = 0.5
-_MAX_BACKOFF_SECONDS = 20.0
+_MAX_BACKOFF_SECONDS = 30.0
+# The development instance sustains roughly six requests a second before it
+# starts answering 429. Pacing under that is what makes a thousands-of-requests
+# run finish; retries alone just rediscover the ceiling on every call.
+_DEFAULT_REQUESTS_PER_SECOND = 5.0
 
 _T = TypeVar("_T")
 
@@ -55,10 +61,12 @@ class GoodMemClient:
         tls_verify: bool = True,
         timeout_seconds: float = 300.0,
         max_attempts: int = _MAX_ATTEMPTS,
+        requests_per_second: float = _DEFAULT_REQUESTS_PER_SECOND,
     ) -> None:
         if not api_key:
             raise GoodMemError("GOODMEM_API_KEY is not set")
         self._max_attempts = max(1, max_attempts)
+        self._limiter = RateLimiter(requests_per_second)
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
             headers={"x-api-key": api_key, "Content-Type": "application/json"},
@@ -94,13 +102,19 @@ class GoodMemClient:
         """
         last: _Throttled | None = None
         for attempt in range(self._max_attempts):
+            self._limiter.acquire()
             try:
                 return attempt_fn()
             except _Throttled as throttled:
                 last = throttled
                 if attempt == self._max_attempts - 1:
                     break
-                time.sleep(_backoff_seconds(attempt, throttled.retry_after))
+                delay = _backoff_seconds(attempt, throttled.retry_after)
+                # Stand the whole pool down, not just this worker: the budget is
+                # shared, so letting the others keep firing guarantees the retry
+                # arrives into an empty bucket again.
+                self._limiter.pause(delay)
+                time.sleep(delay)
         assert last is not None
         raise GoodMemError(
             f"{describe} still failing after {self._max_attempts} attempts: "

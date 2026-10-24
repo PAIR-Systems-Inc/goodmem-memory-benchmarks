@@ -46,6 +46,7 @@ def _client(cfg: config_module.RunConfig) -> GoodMemClient:
         cfg.server.api_key,
         tls_verify=cfg.server.tls_verify,
         timeout_seconds=cfg.server.timeout_seconds,
+        requests_per_second=cfg.server.requests_per_second,
     )
 
 

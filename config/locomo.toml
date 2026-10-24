@@ -17,6 +17,10 @@ reader_concurrency = 50
 base_url = "https://localhost:8080"
 tls_verify = false
 timeout_seconds = 300.0
+# The instance starts answering 429 above roughly six requests a second. Pacing
+# under that is what lets a 1,540-question pass finish; the client also honours
+# Retry-After and stands the whole worker pool down when it is throttled.
+requests_per_second = 5.0
 
 [models]
 # Voyage 4 Large (1024d) and voyage-rerank-2.5, as registered on this instance.

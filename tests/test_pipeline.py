@@ -246,3 +246,54 @@ def test_retrieval_record_round_trips_through_json() -> None:
     record = _record(("D1:1",), ["D1:1", "D1:2"], ["D1:1"])
     restored = RetrievalRecord.from_json(json.loads(json.dumps(record.to_json())))
     assert restored.to_json() == record.to_json()
+
+
+# -- rate limiting -------------------------------------------------------
+
+
+def test_rate_limiter_spaces_requests_out() -> None:
+    """Permits are scheduled, so a burst of callers cannot all go at once."""
+    import time
+
+    from gmbench.ratelimit import RateLimiter
+
+    limiter = RateLimiter(per_second=50.0)
+    started = time.monotonic()
+    for _ in range(5):
+        limiter.acquire()
+    # Five permits at 50/s is four intervals of 20ms once the first is free.
+    assert time.monotonic() - started >= 0.07
+
+
+def test_rate_limiter_disabled_when_rate_is_not_positive() -> None:
+    import time
+
+    from gmbench.ratelimit import RateLimiter
+
+    limiter = RateLimiter(per_second=0.0)
+    assert not limiter.enabled
+    started = time.monotonic()
+    for _ in range(100):
+        limiter.acquire()
+    assert time.monotonic() - started < 0.05
+
+
+def test_rate_limiter_pause_holds_subsequent_callers() -> None:
+    """A 429 should stand the whole pool down, not just the worker that saw it."""
+    import time
+
+    from gmbench.ratelimit import RateLimiter
+
+    limiter = RateLimiter(per_second=1000.0)
+    limiter.pause(0.15)
+    started = time.monotonic()
+    limiter.acquire()
+    assert time.monotonic() - started >= 0.12
+
+
+def test_rate_limiter_per_minute_converts_the_budget() -> None:
+    from gmbench.ratelimit import RateLimiter
+
+    limiter = RateLimiter.per_minute(1500)
+    assert limiter.enabled
+    assert limiter._interval == pytest.approx(60.0 / 1500)
