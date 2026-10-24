@@ -487,6 +487,30 @@ def _answer_one(
     )
 
 
+def _retry_errored(path: Path) -> set[str]:
+    """Returns the outcomes worth keeping, dropping errored ones from the shard.
+
+    An errored outcome is not a completed one. Counting it as done means a
+    resume skips exactly the questions that need redoing -- and an error scores
+    zero, so the run would be resumed into a permanently depressed number. The
+    shard is rewritten without them so the retried rows append cleanly instead
+    of leaving two rows for one question.
+
+    Returns:
+      The ids of outcomes that succeeded and should not be repeated.
+    """
+    if not path.exists():
+        return set()
+    kept = [row for row in jsonl.read_rows(path) if not row.get("error")]
+    dropped = sum(1 for _ in jsonl.read_rows(path)) - len(kept)
+    if dropped:
+        tqdm.write(f"resume: retrying {dropped} questions that errored")
+        with path.open("w") as handle:
+            for row in kept:
+                handle.write(json.dumps(row) + "\n")
+    return {str(row["qid"]) for row in kept}
+
+
 def run_capability(
     client: GoodMemClient,
     config: RunConfig,
@@ -543,9 +567,9 @@ def run_capability(
         )
 
     path = outcomes_path(config, capability)
-    already = jsonl.completed_keys(path) if resume else set()
     if not resume and path.exists():
         path.unlink()
+    already = _retry_errored(path) if resume else set()
 
     with jsonl.ShardWriter(path) as shard:
         for block in selected:

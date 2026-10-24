@@ -636,6 +636,22 @@ class GoodMemClient:
         return reranked
 
 
+def _is_throttle(message: str) -> bool:
+    """Says whether a degraded-status message describes a provider throttle.
+
+    Matched on the message because the stream carries no structured upstream
+    status. Deliberately narrow: a rerank that failed for any other reason stays
+    fatal, since retrying it would just spend the budget rediscovering it.
+    """
+    low = message.lower()
+    return (
+        "429" in low
+        or "too many requests" in low
+        or "rate limit" in low
+        or "rate_limit" in low
+    )
+
+
 def _check_status(status: dict[str, Any]) -> None:
     """Fails the request when the server reports a degraded result set.
 
@@ -645,12 +661,20 @@ def _check_status(status: dict[str, Any]) -> None:
     code = status.get("code", "")
     if code in _BENIGN_RETRIEVAL_STATUS:
         return
+    message = str(status.get("message", ""))
     if code in _FATAL_RETRIEVAL_STATUS:
-        raise GoodMemError(f"retrieval degraded ({code}): {status.get('message', '')}")
+        # A provider throttle reaches us inside the stream as a degraded status
+        # rather than as an HTTP 429, so the transport-level retry never sees
+        # it. Left fatal, it records a dead question: 248 of 500 EventQA
+        # questions scored zero on a "Reranking request failed with status 429"
+        # and dragged the published source score down by half.
+        if _is_throttle(message):
+            raise _Throttled(429, f"{code}: {message}", None)
+        raise GoodMemError(f"retrieval degraded ({code}): {message}")
     # An unrecognised code is treated as fatal rather than ignored: a new
     # warning the server learns to emit should stop a benchmark run, not be
     # absorbed into a slightly lower score.
-    raise GoodMemError(f"unrecognised retrieval status ({code}): {status.get('message', '')}")
+    raise GoodMemError(f"unrecognised retrieval status ({code}): {message}")
 
 
 def _to_chunk(item: dict[str, Any], memories: list[dict[str, Any]]) -> RetrievedChunk:

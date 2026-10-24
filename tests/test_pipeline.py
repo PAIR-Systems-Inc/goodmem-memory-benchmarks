@@ -1352,3 +1352,59 @@ def test_list_spaces_follows_pagination(monkeypatch) -> None:
     assert names[-1] == "s89"
     assert "nextToken" not in seen[0]
     assert seen[1]["nextToken"] == "t1", "token from page one was not sent"
+
+
+def test_throttled_rerank_is_retried_not_recorded_as_a_dead_question() -> None:
+    """A 429 inside the stream must be retryable.
+
+    The provider throttle arrives as a RERANKING_FAILED status frame, not an
+    HTTP 429, so the transport retry never sees it. Treated as fatal it scores
+    the question zero: 248 of 500 EventQA questions died this way and halved
+    the source's published score.
+    """
+    import pytest as _pytest
+
+    from gmbench.client import _check_status, _Throttled
+
+    with _pytest.raises(_Throttled):
+        _check_status(
+            {
+                "code": "RERANKING_FAILED",
+                "message": "Reranking failed: Reranking request failed with status 429",
+            }
+        )
+
+
+def test_a_rerank_failure_that_is_not_a_throttle_stays_fatal() -> None:
+    """Only throttles retry; anything else must still stop the run."""
+    import pytest as _pytest
+
+    from gmbench.client import GoodMemError, _check_status
+
+    with _pytest.raises(GoodMemError, match="RERANKING_FAILED"):
+        _check_status(
+            {"code": "RERANKING_FAILED", "message": "model not found: bad-reranker-id"}
+        )
+
+
+def test_resume_retries_errored_outcomes(tmp_path) -> None:
+    """An errored outcome must not count as completed.
+
+    An error scores zero, so treating it as done resumes the run into a
+    permanently depressed number -- and it is the questions that failed which
+    most need another attempt.
+    """
+    import json as _json
+
+    from gmbench.mab_run import _retry_errored
+
+    path = tmp_path / "outcomes.jsonl"
+    with path.open("w") as handle:
+        for qid, err in (("a", None), ("b", "GoodMemError: 429"), ("c", None)):
+            handle.write(_json.dumps({"qid": qid, "error": err, "correct": True}) + "\n")
+
+    keep = _retry_errored(path)
+
+    assert keep == {"a", "c"}, "errored question was treated as done"
+    remaining = [_json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    assert [r["qid"] for r in remaining] == ["a", "c"], "errored row was left in the shard"
