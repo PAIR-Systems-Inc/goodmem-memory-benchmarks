@@ -239,7 +239,7 @@ plausible number is not, so the harness is built to make the second impossible.
 |---|---:|---|
 | **LoCoMo** | 1,540 | Fully scored, two configurations, both readers |
 | **MemoryAgentBench** | 2,071 selected | Conflict Resolution scored; the other three groups ship as a verified adapter |
-| **BEAM-1M** | — | Ingestion cost over 1,710 messages |
+| **BEAM-1M** | — | Fully measured: 1,710 messages, 1.43 h, flat per-message cost |
 | LongMemEval-S | 500 | Data acquired and verified, adapter not written |
 | PersonaMem-v2 | 5,000 | Data acquired and verified, adapter not written |
 
@@ -311,9 +311,46 @@ Ingestion cost, not accuracy. One ordered 1,710-message conversation approaching
 a million tokens, streamed a message at a time. The measured quantity is
 **Add-to-ready**, not Add: GoodMem's create returns once the memory is persisted
 with embedding still queued, so timing the call would measure the API rather than
-the system. Outer concurrency is one by construction — no batching, no overlap —
-because a pipelined ingest would be a different and better number measuring
-something the paper did not measure.
+the system. Outer concurrency is one by construction — no batching, no overlap.
+
+**Result: 1,710 messages, ~1.06M tokens, 1.43 hours, 3.00 s/message.**
+
+| System | Cumulative ingest | vs GoodMem |
+|---|---:|---|
+| RAW-RAG (local in-process index) | 0.33 h | 4.3× faster |
+| **GoodMem** | **1.43 h** | — |
+| MemOS | 3.25 h | 2.3× slower |
+| Mem0 | 3.9 h | 2.7× slower |
+| EMem | 8.5 h | 5.9× slower |
+| MemMachine | 18.2 h | 12.7× slower |
+| Memora | 27.0 h | 18.9× slower |
+
+Comparison figures are the paper's, measured on its hardware against its own
+configurations — not a controlled head-to-head. Treat the ordering as meaningful
+and the ratios as approximate.
+
+**The shape matters more than the endpoint.** This benchmark exists to catch
+ingest cost that grows as history accumulates, which is what happens when a
+system re-reads or re-consolidates what it already stored. Across the full run,
+per-message cost is flat:
+
+| Segment of the conversation | Add | Add-to-ready | Total |
+|---|---:|---:|---:|
+| First 20% | 0.206 s | 2.795 s | 3.001 s |
+| Middle 20% | 0.206 s | 2.799 s | 3.005 s |
+| Last 20% | 0.205 s | 2.799 s | 3.005 s |
+
+Ingesting the 1,710th message into a million-token store costs the same as the
+first. The cost is per-job overhead, not a function of store size.
+
+Two honest qualifications. The `Add` column is floored by this harness's own
+request pacing, so it is an upper bound on GoodMem's accept latency rather than a
+measurement of it. And the 2.8 s to readiness is background-job scheduling under
+*strictly sequential single-message adds*, which is the paper's protocol and not
+how anyone would bulk-load: the same harness ingests LoCoMo at **51 turns per
+second** when batching is allowed, about 150× faster per message. The sequential
+number measures per-job latency; the batched one measures throughput. Both are
+real, and they answer different questions.
 
 ---
 

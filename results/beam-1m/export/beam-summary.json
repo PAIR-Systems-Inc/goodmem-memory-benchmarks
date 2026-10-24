@@ -1,0 +1,14 @@
+{
+  "benchmark": "beam-1m",
+  "run_tag": "beam-1m",
+  "conversation_id": "1",
+  "conversation_title": "Building a Multi-Language AI Chatbot with Contextual Memory",
+  "messages_total": 1710,
+  "messages_ingested": 1710,
+  "approximate_tokens": 1061523,
+  "cumulative_seconds": 5136.3960295198485,
+  "cumulative_hours": 1.4267766748666246,
+  "mean_seconds_per_message": 3.0037403681402624,
+  "embedder_id": "019ced53-4d7f-77f8-9fc2-12c7ab16dd1f",
+  "method": "one message per Add, outer concurrency one, each Add followed by a poll until the memory reports COMPLETED"
+}
