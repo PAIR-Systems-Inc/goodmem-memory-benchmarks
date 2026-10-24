@@ -131,6 +131,36 @@ the memory system. Note for anyone extending this: Voyage shipped `rerank-3` on
 2026-09-30, which claims to beat Cohere Rerank-v4.0 Pro; this repository does not
 use it, for the same reason.
 
+### A reranker can be worse than no reranker
+
+Qwen3-Reranker is *generative*. It does not emit a similarity score — it scores
+by prompting the model with a yes/no relevance template, which the paper
+reproduces in its appendix G.1, and reading the verdict. An endpoint that serves
+the weights behind a generic scoring API without applying that template returns
+numbers that are not relevance at all.
+
+That is not a hypothetical. Measured against LoCoMo's annotated evidence, a
+self-hosted `Qwen3-Reranker-4B` over vLLM put the correct turn in the top-15
+**16.7%** of the time. Switching reranking off entirely managed **75.0%**. The
+same pipeline scored 55.71 overall with that reranker and 87.84 with a working
+one — a 32-point swing from one misconfigured stage.
+
+| Reranker | Gold evidence in top-15 |
+|---|---:|
+| `qwen3-rerank`, hosted (DashScope) | **91.7%** |
+| `rerank-2.5` / `rerank-3` / `rerank-3-lite` (Voyage) | 83.3% |
+| `gte-rerank-v2` (DashScope) | 83.3% |
+| *no reranking at all* | 75.0% |
+| `Qwen3-Reranker-4B`, self-hosted over vLLM | 16.7% |
+
+Two things follow. If you serve a generative reranker yourself, verify it against
+labelled evidence before trusting it — a broken one is silent, since it returns
+plausible scores in the right shape and the only symptom is a worse score
+somewhere downstream. And this is what the coverage diagnostic is for: a
+30-point accuracy drop could have been the chunking, the embedder, the prompt,
+the judge or the index, and coverage located the one stage that was wrong in a
+single command, before spending a reader token.
+
 ---
 
 ## Evidence coverage

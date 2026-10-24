@@ -377,14 +377,17 @@ def cmd_mab(args: argparse.Namespace, console: Console) -> int:
     table.add_column("Source", style="bold")
     table.add_column("N", justify="right")
     table.add_column("Accuracy", justify="right")
-    table.add_column("Gold fact retrieved", justify="right")
+    table.add_column("Single gold fact", justify="right")
+    table.add_column("...and retrieved", justify="right")
     table.add_column("Errors", justify="right")
     for source, bucket in sorted(document["by_source"].items()):
+        rate = bucket["gold_retrieval_rate"]
         table.add_row(
             source,
             str(bucket["questions"]),
             f"{bucket['accuracy']:.2f}",
-            f"{bucket['gold_retrieval_rate']:.2f}",
+            f"{bucket['gold_identifiable_rate']:.0f}%",
+            f"{rate:.0f}%" if rate is not None else "n/a",
             str(bucket["errors"]) if bucket["errors"] else "-",
         )
     table.add_row(
@@ -392,14 +395,17 @@ def cmd_mab(args: argparse.Namespace, console: Console) -> int:
         str(document["questions"]),
         f"{document['accuracy']:.2f}",
         "-",
+        "-",
         str(document["errors"]) if document["errors"] else "-",
         style="bold cyan",
     )
     console.print(table)
     console.print(
-        "[dim]Gold fact retrieved: the share of questions where the highest-serial "
-        "fact stating a gold answer reached the reader. A wrong answer with the "
-        "gold fact present is a reading failure; without it, a retrieval one.[/dim]"
+        "[dim]Single gold fact: the share of questions where one fact both names "
+        "the question's entity and states the answer — near-total for single-hop, "
+        "near-zero for multi-hop, where the answer-bearing fact names the bridging "
+        "entity instead. ...and retrieved: of those, how often that fact reached "
+        "the reader.[/dim]"
     )
     console.print(f"[dim]Summary written to {path}[/dim]")
     return 1 if document["errors"] else 0

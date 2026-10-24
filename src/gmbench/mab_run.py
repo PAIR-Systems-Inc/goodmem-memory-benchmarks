@@ -84,22 +84,84 @@ def score(prediction: str, answers: list[str]) -> bool:
     return False
 
 
-def gold_serial_for(units: list[Unit], answers: list[str]) -> int | None:
-    """Finds the highest serial among facts stating a gold answer.
+_ENTITY_RE = re.compile(r"\b(?:[A-Z0-9][\w'’.-]*)(?:\s+(?:of|the|de|van|von|al)\s+|\s+)?(?:[A-Z0-9][\w'’.-]*)*")
+# Words that appear in the templated questions themselves and so carry no
+# entity information.
+_TEMPLATE_WORDS = frozenset(
+    """based provided knowledge pool what which who where when whose how is are was were
+    the a an of in on at to for with and or name current sport religion country city
+    location associated affiliated founded created born died spouse famous passed away
+    come into existence did does do you your my i""".split()
+)
 
-    This is the fact the task wants selected, so recording it lets a wrong
-    answer be attributed: a prediction can fail because the authoritative fact
-    was never retrieved, or because it was retrieved and the reader picked an
-    older one. Those are different problems and the scores alone cannot tell
-    them apart.
+
+def question_entities(question: str) -> list[str]:
+    """Extracts the entity mentions a templated question is asking about.
+
+    The conflict-resolution questions are generated from a handful of relation
+    templates, so what distinguishes one from another is the entity name. Those
+    are the capitalised runs left after the template vocabulary is removed.
+
+    Args:
+      question: The question text.
+
+    Returns:
+      Candidate entity strings, longest first, lowercased.
     """
+    candidates: list[str] = []
+    for match in _ENTITY_RE.finditer(question):
+        phrase = match.group(0).strip(" ?.,")
+        if not phrase:
+            continue
+        words = [w for w in phrase.split() if w.lower() not in _TEMPLATE_WORDS]
+        if not words:
+            continue
+        rebuilt = " ".join(words)
+        # A single short token is as likely to be a stray capitalised word as an
+        # entity, so require either several words or a substantial one.
+        if len(words) > 1 or len(rebuilt) >= 4:
+            candidates.append(rebuilt.lower())
+    return sorted(set(candidates), key=len, reverse=True)
+
+
+def gold_serial_for(
+    units: list[Unit], answers: list[str], question: str
+) -> int | None:
+    """Finds the newest fact that both names the question's entity and states a gold answer.
+
+    Matching on the answer alone does not work: a gold string like "basketball"
+    appears in dozens of facts about unrelated entities, and the highest-serial
+    one among those is almost never the fact the question is about. The fact that
+    matters is the latest one about *this* entity, which is what the reader is
+    supposed to prefer over its earlier, conflicting sibling.
+
+    Returns ``None`` when no single fact satisfies both -- which is the normal
+    case for multi-hop, where the answer-bearing fact names the bridging entity
+    rather than the one in the question. That is a property of the task, not a
+    measurement failure, and the caller reports it as such.
+
+    Args:
+      units: Every fact in the pool.
+      answers: Acceptable gold answer strings.
+      question: The question, used to identify its entity.
+
+    Returns:
+      The highest serial among qualifying facts, or None if there are none.
+    """
+    entities = question_entities(question)
+    if not entities:
+        return None
+    wanted = [" ".join(str(a).lower().split()) for a in answers if str(a).strip()]
     best: int | None = None
     for unit in units:
         if unit.serial is None:
             continue
-        text = unit.text.lower()
-        if any(" ".join(str(a).lower().split()) in text for a in answers):
-            best = unit.serial if best is None else max(best, unit.serial)
+        text = " ".join(unit.text.lower().split())
+        if not any(answer in text for answer in wanted):
+            continue
+        if not any(entity in text for entity in entities):
+            continue
+        best = unit.serial if best is None else max(best, unit.serial)
     return best
 
 
@@ -130,6 +192,23 @@ def provision_and_ingest(
         raise GoodMemError(f"{block.block_id}: context produced no ingestion units")
 
     name = f"gmbench-mab-{block.label}-{config.run_tag}"[:255]
+
+    # Idempotent: a re-run should reuse a fact pool that is already stored
+    # rather than fail on the name, and should rebuild one that is incomplete
+    # rather than query a partial store.
+    existing = next((s for s in client.list_spaces() if s.get("name") == name), None)
+    if existing is not None:
+        space_id = existing["spaceId"]
+        statuses = [m.get("processingStatus") for m in client.list_memories(space_id)]
+        if statuses.count("COMPLETED") >= len(units) and "FAILED" not in statuses:
+            tqdm.write(f"{block.source}: reusing {len(units)} facts already stored")
+            return space_id, units
+        tqdm.write(
+            f"{block.source}: existing space holds {statuses.count('COMPLETED')} of "
+            f"{len(units)} facts; rebuilding it"
+        )
+        client.delete_space(space_id)
+
     space = client.create_space(
         name,
         config.models.embedder_id,
@@ -258,7 +337,7 @@ def _answer_one(
         prediction=prediction,
         correct=score(prediction, answers) if not error else False,
         retrieved_serials=[u.serial for u in retrieved if u.serial is not None],
-        gold_serial=gold_serial_for(units, answers),
+        gold_serial=gold_serial_for(units, answers, task.question),
         error=error,
     )
 
@@ -335,18 +414,33 @@ def summarize(outcomes: list[Outcome]) -> dict[str, Any]:
     for outcome in outcomes:
         bucket = by_source.setdefault(
             outcome.source,
-            {"questions": 0, "correct": 0, "gold_retrieved": 0, "errors": 0},
+            {
+                "questions": 0,
+                "correct": 0,
+                "gold_retrieved": 0,
+                "gold_identifiable": 0,
+                "errors": 0,
+            },
         )
         bucket["questions"] += 1
         bucket["correct"] += int(outcome.correct)
         bucket["errors"] += int(bool(outcome.error))
-        if outcome.gold_serial is not None and outcome.gold_serial in outcome.retrieved_serials:
-            bucket["gold_retrieved"] += 1
+        if outcome.gold_serial is not None:
+            bucket["gold_identifiable"] += 1
+            if outcome.gold_serial in outcome.retrieved_serials:
+                bucket["gold_retrieved"] += 1
 
     for bucket in by_source.values():
         n = bucket["questions"] or 1
         bucket["accuracy"] = 100.0 * bucket["correct"] / n
-        bucket["gold_retrieval_rate"] = 100.0 * bucket["gold_retrieved"] / n
+        identifiable = bucket["gold_identifiable"]
+        # Conditioned on the questions where a single fact both names the entity
+        # and states the answer. For multi-hop that is almost none, because the
+        # answer-bearing fact names the bridging entity instead.
+        bucket["gold_retrieval_rate"] = (
+            100.0 * bucket["gold_retrieved"] / identifiable if identifiable else None
+        )
+        bucket["gold_identifiable_rate"] = 100.0 * identifiable / n
 
     total = len(outcomes) or 1
     return {

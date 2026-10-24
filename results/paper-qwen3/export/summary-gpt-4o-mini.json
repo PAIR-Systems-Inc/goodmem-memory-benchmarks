@@ -1,0 +1,87 @@
+{
+  "benchmark": "locomo",
+  "run_tag": "paper-qwen3",
+  "ingest_tag": "paper-models",
+  "reader_model": "gpt-4o-mini",
+  "judge_model": "gpt-4o-mini-2024-07-18",
+  "judge_repetitions": 3,
+  "embedder": {
+    "provider": "OPENAI",
+    "model": "text-embedding-3-small",
+    "display_name": "OpenAI text-embedding-3-small"
+  },
+  "reranker": {
+    "provider": "DASHSCOPE",
+    "model": "qwen3-rerank",
+    "display_name": "DashScope Live Native Rerank 20260824"
+  },
+  "retrieval": {
+    "dense_candidates": 128,
+    "final_k": 15,
+    "neighbor_turns": 2,
+    "ef_search": 400,
+    "iterative_scan": "ITERATIVE_SCAN_RELAXED_ORDER"
+  },
+  "chunking": {
+    "chunk_size": 1500,
+    "chunk_overlap": 150,
+    "length_measurement": "CHARACTER_COUNT"
+  },
+  "evidence": {
+    "mean_chars": 10775.116883116883,
+    "mean_turns": 61.94155844155844
+  },
+  "integrity": {
+    "questions": 1540,
+    "reader_errors": 0,
+    "reader_truncated": 0,
+    "reader_missing_final_marker": 0,
+    "judge_infrastructure_failures": 0,
+    "judge_unparseable": 0,
+    "judgements_expected": 4620,
+    "judgements_present": 4620,
+    "clean": true,
+    "problems": []
+  },
+  "scores": [
+    {
+      "slice": "multi_hop",
+      "questions": 282,
+      "accuracy": 87.47044917257682,
+      "ci_low": 83.56973995271866,
+      "ci_high": 91.13475177304964
+    },
+    {
+      "slice": "open_domain",
+      "questions": 96,
+      "accuracy": 72.22222222222221,
+      "ci_low": 63.194444444444436,
+      "ci_high": 80.90277777777779
+    },
+    {
+      "slice": "single_hop",
+      "questions": 841,
+      "accuracy": 94.0943321442727,
+      "ci_low": 92.46928260007925,
+      "ci_high": 95.60047562425683
+    },
+    {
+      "slice": "temporal",
+      "questions": 321,
+      "accuracy": 80.68535825545172,
+      "ci_low": 76.22014537902388,
+      "ci_high": 84.83904465212876
+    },
+    {
+      "slice": "overall",
+      "questions": 1540,
+      "accuracy": 88.72294372294371,
+      "ci_low": 87.1861471861472,
+      "ci_high": 90.23809523809526
+    }
+  ],
+  "bootstrap": {
+    "resamples": 10000,
+    "seed": 20261023
+  }
+}

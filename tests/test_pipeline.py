@@ -767,20 +767,57 @@ def test_substring_scoring_rejects_a_miss_and_an_empty_prediction() -> None:
     assert not score("anything", [])
 
 
-def test_gold_serial_picks_the_newest_fact_stating_the_answer() -> None:
-    """Precedence is the whole task: the authoritative fact is the latest one."""
+def test_question_entities_strips_the_relation_template() -> None:
+    """What distinguishes these questions is the entity, not the relation."""
+    from gmbench.mab_run import question_entities
+
+    assert question_entities("Which sport is Salem-Keizer Volcanoes associated with?") == [
+        "salem-keizer volcanoes"
+    ]
+    assert question_entities(
+        "Where did the religion associated with the Bagratuni Dynasty come into existence?"
+    ) == ["bagratuni dynasty"]
+
+
+def test_gold_serial_requires_the_entity_not_just_the_answer() -> None:
+    """Matching the answer alone picks a fact about something else entirely.
+
+    A gold string like "basketball" occurs in dozens of facts about unrelated
+    entities, and the highest-serial one among those is almost never the fact
+    the question concerns.
+    """
+    from gmbench.mab_run import gold_serial_for
+    from gmbench.memoryagentbench import Unit
+
+    question = "Which sport is Salem-Keizer Volcanoes associated with?"
+    units = [
+        Unit("a", "1257. Salem-Keizer Volcanoes is associated with the sport of baseball.", 0, 1257),
+        Unit("b", "1722. Salem-Keizer Volcanoes is associated with the sport of basketball.", 1, 1722),
+        # Newer, states the gold answer, but about a different entity.
+        Unit("c", "2269. Serbian SuperLiga is associated with the sport of basketball.", 2, 2269),
+    ]
+    assert gold_serial_for(units, ["basketball"], question) == 1722
+    assert gold_serial_for(units, ["baseball"], question) == 1257
+    assert gold_serial_for(units, ["cricket"], question) is None
+
+
+def test_gold_serial_is_none_when_the_answer_fact_omits_the_question_entity() -> None:
+    """The multi-hop shape: the answer-bearing fact names the bridging entity.
+
+    That is a property of the task rather than a measurement failure, so the
+    caller reports it separately instead of counting it as a retrieval miss.
+    """
     from gmbench.mab_run import gold_serial_for
     from gmbench.memoryagentbench import Unit
 
     units = [
-        Unit("f-1", "1. goaltender is associated with the sport of ice hockey.", 0, 1),
-        Unit("f-2", "99. something irrelevant.", 1, 99),
-        Unit("f-3", "223. goaltender is associated with the sport of pesapallo.", 2, 223),
-        Unit("f-4", "310. goaltender is associated with the sport of pesapallo.", 3, 310),
+        Unit("a", "300. Bagratuni Dynasty is affiliated with the religion of Christianity.", 0, 300),
+        Unit("b", "475. Christianity was founded in the city of Taipei.", 1, 475),
     ]
-    assert gold_serial_for(units, ["pesapallo"]) == 310
-    assert gold_serial_for(units, ["ice hockey"]) == 1
-    assert gold_serial_for(units, ["cricket"]) is None
+    question = (
+        "Where did the religion associated with the Bagratuni Dynasty come into existence?"
+    )
+    assert gold_serial_for(units, ["Taipei"], question) is None
 
 
 def test_knowledge_pool_is_rendered_in_serial_order() -> None:
@@ -813,11 +850,29 @@ def test_summary_separates_a_reading_failure_from_a_retrieval_one() -> None:
         # Gold fact never retrieved: a retrieval failure.
         Outcome("q3", "factconsolidation_sh", "conflict_resolution", "?", ["c"],
                 "wrong", False, [5, 6], 900),
+        # No single fact names the entity and states the answer: not attributable.
+        Outcome("q4", "factconsolidation_sh", "conflict_resolution", "?", ["d"],
+                "wrong", False, [7], None),
     ]
     document = summarize(outcomes)
     bucket = document["by_source"]["factconsolidation_sh"]
-    assert bucket["questions"] == 3
-    assert bucket["accuracy"] == pytest.approx(100 / 3)
+    assert bucket["questions"] == 4
+    assert bucket["accuracy"] == pytest.approx(25.0)
+    assert bucket["gold_identifiable"] == 3, "q4 has no single gold fact"
     assert bucket["gold_retrieved"] == 2
+    # Conditioned on the attributable questions, not on all of them.
     assert bucket["gold_retrieval_rate"] == pytest.approx(200 / 3)
+    assert bucket["gold_identifiable_rate"] == pytest.approx(75.0)
     assert document["errors"] == 0
+
+
+def test_summary_reports_no_retrieval_rate_when_nothing_is_attributable() -> None:
+    from gmbench.mab_run import Outcome, summarize
+
+    outcomes = [
+        Outcome("q1", "factconsolidation_mh", "conflict_resolution", "?", ["a"],
+                "wrong", False, [1], None),
+    ]
+    bucket = summarize(outcomes)["by_source"]["factconsolidation_mh"]
+    assert bucket["gold_retrieval_rate"] is None, "a rate over zero questions is not zero"
+    assert bucket["gold_identifiable_rate"] == pytest.approx(0.0)
