@@ -82,12 +82,36 @@ def cmd_ingest(args: argparse.Namespace, console: Console) -> int:
 def cmd_retrieve(args: argparse.Namespace, console: Console) -> int:
     cfg = _load(args)
     convs = _conversations(cfg, args.conversations_limit)
+
+    if args.from_scores is not None:
+        records = retrieve.assemble_from_scores(
+            cfg, convs, scores_file=Path(args.from_scores) if args.from_scores else None
+        )
+        console.print(
+            f"[green]Assembled {len(records)} contexts from external rerank scores[/green]"
+        )
+        report.coverage_table(coverage.compute(records), console)
+        return 0
+
     bindings = ingest.load_manifest(cfg)
     missing = [c.conversation_id for c in convs if c.conversation_id not in bindings]
     if missing:
         console.print(f"[red]No space for {missing}; run ingest first[/red]")
         return 1
+
     with _client(cfg) as client:
+        if args.dense_only:
+            rows = retrieve.collect_dense(
+                client, cfg, convs, bindings,
+                limit_per_conversation=args.questions_limit,
+            )
+            path = cfg.run_dir / "dense-candidates.jsonl"
+            console.print(
+                f"[green]Wrote {len(rows)} dense candidate sets[/green] to {path}\n"
+                "[dim]Score them with tools/qwen3_reranker.py, then re-run retrieve "
+                "with --from-scores.[/dim]"
+            )
+            return 0
         records = retrieve.run(
             client, cfg, convs, bindings, limit_per_conversation=args.questions_limit
         )
@@ -568,6 +592,19 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         child = sub.add_parser(name, help=help_text)
         child.set_defaults(handler=handler)
+        if name == "retrieve":
+            child.add_argument(
+                "--dense-only",
+                action="store_true",
+                help="Write the dense candidate sets for an external reranker.",
+            )
+            child.add_argument(
+                "--from-scores",
+                nargs="?",
+                const="",
+                default=None,
+                help="Assemble contexts from an external reranker's scores.",
+            )
         if name == "verify-reranker":
             child.add_argument(
                 "--rerankers", nargs="*", default=None, help="Reranker UUIDs to check."

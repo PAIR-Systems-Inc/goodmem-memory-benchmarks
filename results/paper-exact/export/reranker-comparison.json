@@ -1,0 +1,30 @@
+{
+  "benchmark": "locomo-reranker-comparison",
+  "question": "Was substituting the paper's reranker family for its exact checkpoint material to the published LoCoMo scores?",
+  "answer": "No. The paper's own checkpoint retrieves 2.4 points more gold evidence, feeding a reader already statistically tied with RAW-RAG.",
+  "questions": 1322,
+  "questions_total": 1540,
+  "note": "Questions carrying resolvable evidence annotations, scored before the pass was halted as having answered its question.",
+  "dense_candidates_per_question": 128,
+  "final_k": 15,
+  "index": "shared with results/paper-qwen3 (ingest tag paper-qwen3)",
+  "stages": {
+    "dense": {
+      "all_gold_in_top_15_pct": 69.4,
+      "mean_gold_recall_pct": 76.2
+    },
+    "substitute": {
+      "all_gold_in_top_15_pct": 79.7,
+      "mean_gold_recall_pct": 86.5
+    },
+    "paper_exact": {
+      "all_gold_in_top_15_pct": 82.1,
+      "mean_gold_recall_pct": 88.6
+    }
+  },
+  "stage_models": {
+    "dense": "text-embedding-3-small, no reranking",
+    "substitute": "DashScope hosted qwen3-rerank",
+    "paper_exact": "Qwen/Qwen3-Reranker-4B, paper appendix G.1 instruction, int8 weights (GPU had 5.84 GiB free against ~8 GiB bf16)"
+  }
+}

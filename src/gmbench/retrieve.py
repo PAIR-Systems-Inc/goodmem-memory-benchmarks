@@ -11,7 +11,7 @@ paths that bare top-k windows tend to cut through.
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -21,7 +21,7 @@ from tqdm import tqdm
 from .client import GoodMemClient, GoodMemError, RetrievedChunk
 from .config import RunConfig
 from .ingest import SpaceBinding
-from . import validate
+from . import exact_reranker, validate
 from .locomo import Conversation, Question, Turn
 
 
@@ -280,4 +280,118 @@ def load_records(
         ]
     if expected_qids is not None:
         validate.require("retrieve", expected_qids, [record.qid for record in records])
+    return sorted(records, key=lambda record: record.qid)
+
+
+def collect_dense(
+    client: GoodMemClient,
+    config: RunConfig,
+    conversations: list[Conversation],
+    bindings: dict[str, SpaceBinding],
+    *,
+    limit_per_conversation: int | None = None,
+) -> list[exact_reranker.Candidates]:
+    """Fetches the dense candidate set for every question, without reranking.
+
+    This is the first of three phases for running the paper's own reranker,
+    which no endpoint here serves correctly. Writing the candidates out lets the
+    reranker run in its own environment, so this package needs no GPU.
+    """
+    jobs: list[tuple[Conversation, SpaceBinding, Question]] = []
+    for conversation in conversations:
+        binding = bindings[conversation.conversation_id]
+        questions = conversation.questions
+        if limit_per_conversation is not None:
+            questions = questions[:limit_per_conversation]
+        jobs.extend((conversation, binding, question) for question in questions)
+
+    rows: list[exact_reranker.Candidates] = []
+    with tqdm(total=len(jobs), desc="dense candidates", unit="q") as progress:
+        with ThreadPoolExecutor(max_workers=config.retrieval.concurrency) as pool:
+            futures = {
+                pool.submit(
+                    client.retrieve_dense,
+                    question.question,
+                    binding.space_id,
+                    candidates=config.retrieval.dense_candidates,
+                    ef_search=config.retrieval.ef_search,
+                    iterative_scan=config.retrieval.iterative_scan,
+                ): (conversation, question)
+                for conversation, binding, question in jobs
+            }
+            for future in as_completed(futures):
+                conversation, question = futures[future]
+                chunks = future.result()
+                if not chunks:
+                    raise GoodMemError(f"{question.qid}: dense retrieval returned nothing")
+                rows.append(
+                    exact_reranker.Candidates(
+                        qid=question.qid,
+                        conversation_id=question.conversation_id,
+                        query=question.question,
+                        dia_ids=tuple(ranked_dia_ids(chunks)),
+                        documents=tuple(chunk.chunk_text for chunk in chunks),
+                    )
+                )
+                progress.update(1)
+
+    path = exact_reranker.candidates_path(config.run_dir)
+    exact_reranker.write_candidates(path, rows)
+    return rows
+
+
+def assemble_from_scores(
+    config: RunConfig,
+    conversations: list[Conversation],
+    *,
+    scores_file: Path | None = None,
+) -> list[RetrievalRecord]:
+    """Builds reader contexts from an external reranker's scores.
+
+    The third phase. Expansion, de-duplication and rendering are identical to
+    the in-GoodMem path; only the ranking came from elsewhere.
+    """
+    by_conversation = {c.conversation_id: c for c in conversations}
+    questions = {
+        question.qid: question
+        for conversation in conversations
+        for question in conversation.questions
+    }
+    candidates = exact_reranker.read_candidates(
+        exact_reranker.candidates_path(config.run_dir)
+    )
+    scores = exact_reranker.read_scores(
+        scores_file or exact_reranker.scores_path(config.run_dir), candidates
+    )
+
+    path = records_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    records: list[RetrievalRecord] = []
+    with path.open("w") as handle:
+        for candidate, selected_ids in exact_reranker.iter_ranked(
+            candidates, scores, config.retrieval.final_k
+        ):
+            conversation = by_conversation[candidate.conversation_id]
+            question = questions[candidate.qid]
+            selected, turns = expand(
+                conversation, selected_ids, config.retrieval.neighbor_turns
+            )
+            gold, unresolvable = conversation.resolvable_evidence(question)
+            record = RetrievalRecord(
+                qid=question.qid,
+                conversation_id=question.conversation_id,
+                category=question.category,
+                question=question.question,
+                answer=question.answer,
+                gold_evidence=gold,
+                gold_unresolvable=unresolvable,
+                selected_dia_ids=selected,
+                context_dia_ids=[turn.dia_id for turn in turns],
+                context=render_context(turns),
+                scores=[round(s, 6) for s in sorted(scores[candidate.qid], reverse=True)][
+                    : config.retrieval.final_k
+                ],
+            )
+            records.append(record)
+            handle.write(json.dumps(record.to_json()) + "\n")
     return sorted(records, key=lambda record: record.qid)

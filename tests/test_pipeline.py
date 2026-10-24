@@ -847,6 +847,23 @@ def test_knowledge_pool_is_rendered_in_serial_order() -> None:
     assert rendered.index("223. middle.") < rendered.index("310. newest.")
 
 
+def _run_config(tmp_path):
+    """A minimal RunConfig pointed at a temporary results directory."""
+    from gmbench import config as cfgmod
+
+    return cfgmod.RunConfig(
+        run_tag="t",
+        ingest_tag="t",
+        dataset_path=DATASET,
+        results_dir=tmp_path,
+        server=cfgmod.ServerConfig(api_key="k"),
+        models=cfgmod.ModelConfig(embedder_id="e", reranker_id="r"),
+        chunking=cfgmod.ChunkingConfig(),
+        retrieval=cfgmod.RetrievalConfig(concurrency=2),
+        ingest=cfgmod.IngestConfig(),
+    )
+
+
 def _outcome(
     qid: str,
     *,
@@ -1161,3 +1178,100 @@ def test_summary_judge_failure_is_not_zero_coverage(monkeypatch) -> None:
     assert mab_run.score_summary(_Garbled(), cfg, "a summary", ["point one"]) is None
     # An empty summary genuinely covers nothing, and that is a zero.
     assert mab_run.score_summary(_Broken(), cfg, "   ", ["point one"]) == 0.0
+
+
+# -- the paper's own reranker, driven externally -------------------------
+
+
+def test_external_scores_must_line_up_with_the_candidates() -> None:
+    """A silent misalignment reranks each question against another's scores.
+
+    That produces a plausible and entirely meaningless result, so the loader
+    refuses anything but an exact cover with matching counts.
+    """
+    from gmbench import exact_reranker as ex
+    from gmbench.client import GoodMemError
+
+    cands = [
+        ex.Candidates("q1", "c", "?", ("D1:1", "D1:2"), ("a", "b")),
+        ex.Candidates("q2", "c", "?", ("D1:3",), ("c",)),
+    ]
+
+    def write(tmp: Path, rows: list[dict]) -> Path:
+        import json as _json
+
+        path = tmp / "scores.jsonl"
+        path.write_text("".join(_json.dumps(r) + "\n" for r in rows))
+        return path
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        good = write(tmp, [{"qid": "q1", "scores": [0.1, 0.9]}, {"qid": "q2", "scores": [0.5]}])
+        assert ex.read_scores(good, cands)["q1"] == [0.1, 0.9]
+
+        short = write(tmp, [{"qid": "q1", "scores": [0.1, 0.9]}])
+        with pytest.raises(GoodMemError, match="missing"):
+            ex.read_scores(short, cands)
+
+        miscount = write(
+            tmp, [{"qid": "q1", "scores": [0.1]}, {"qid": "q2", "scores": [0.5]}]
+        )
+        with pytest.raises(GoodMemError, match="wrong number of scores"):
+            ex.read_scores(miscount, cands)
+
+
+def test_external_ranking_is_by_score_and_deterministic_on_ties() -> None:
+    from gmbench import exact_reranker as ex
+
+    cand = ex.Candidates(
+        "q", "c", "?", ("D1:1", "D1:2", "D1:3", "D1:4"), ("a", "b", "c", "d")
+    )
+    assert ex.rank(cand, [0.1, 0.9, 0.5, 0.2], 2) == ["D1:2", "D1:3"]
+    # Ties keep the dense order GoodMem returned them in.
+    assert ex.rank(cand, [0.5, 0.5, 0.5, 0.5], 3) == ["D1:1", "D1:2", "D1:3"]
+
+
+def test_collect_dense_is_callable_end_to_end(monkeypatch, tmp_path) -> None:
+    """A smoke test over the dense path, which a missing import once broke.
+
+    The failure was a NameError that only appeared at runtime because nothing
+    exercised this function.
+    """
+    from gmbench import retrieve as rt
+    from gmbench.client import RetrievedChunk
+    from gmbench.ingest import SpaceBinding
+
+    turns = [_turn(i) for i in range(5)]
+    question = Question(
+        conversation_id="conv-test",
+        index=0,
+        question="who?",
+        answer="a",
+        category=1,
+        evidence=("D1:1",),
+    )
+    conversation = Conversation(
+        conversation_id="conv-test",
+        speaker_a="Amy",
+        speaker_b="Rob",
+        turns=tuple(turns),
+        questions=(question,),
+    )
+
+    class _Client:
+        def retrieve_dense(self, message, space_id, **kwargs):
+            return [
+                RetrievedChunk(f"m{t.turn_index}", t.render(), 0, 0.5, {"dia_id": t.dia_id})
+                for t in turns
+            ]
+
+    cfg = _run_config(tmp_path)
+    rows = rt.collect_dense(
+        _Client(), cfg, [conversation], {"conv-test": SpaceBinding("conv-test", "s", "n", 5)}
+    )
+    assert len(rows) == 1
+    assert rows[0].qid == question.qid
+    assert len(rows[0].documents) == 5
+    assert (cfg.run_dir / "dense-candidates.jsonl").exists()

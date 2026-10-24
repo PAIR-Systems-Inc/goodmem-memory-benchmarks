@@ -1,0 +1,10 @@
+# Only needed to run the paper's own reranker locally, which the main package
+# deliberately does not depend on: it pulls in CUDA wheels and a GPU.
+#
+#   uv venv --python 3.13 .reranker-venv
+#   VIRTUAL_ENV=.reranker-venv uv pip install -r tools/requirements-reranker.txt
+torch>=2.6
+transformers>=4.51
+accelerate>=1.0
+# int8 weight loading, for GPUs without room for the bf16 checkpoint.
+bitsandbytes>=0.45

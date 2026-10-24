@@ -63,12 +63,12 @@ strongest agentic system in the paper's comparison — on both `gpt-4.1-mini` ro
 The paper-models configuration reaches that on **~2,700 evidence tokens against
 the paper's ~4,800**, a little over half the context budget.
 
-> **Caveat, and it is a real one:** neither reranker the paper used was available
-> in working order on the instance these runs used, so no configuration here is an
-> exact reproduction of a published row. Cohere Rerank-v3.5 needs a credential the
-> instance does not have; Qwen3-Reranker-4B is present but its endpoint returns
-> scores that are not relevance. See [On the reranker](#on-the-reranker--and-a-comparability-gap-you-should-know-about)
-> for the measurements and the one command that closes the gap.
+> **One caveat.** Neither reranker the paper used was usable as served here, so
+> the scored rows pair the paper's embedder with its reranker *family* rather than
+> its exact checkpoint. That substitution is measured, not assumed: the paper's own
+> `Qwen3-Reranker-4B`, driven correctly over the identical index, retrieves 2.4
+> points more gold evidence — not enough to move a reader across a tie. See
+> [On the reranker](#on-the-reranker). Cohere Rerank-v3.5 remains unmeasured.
 
 ### How to read a verdict
 
@@ -127,11 +127,7 @@ something reassembled from chunk offsets.
   sweep of 400 against 800 moved coverage by 0.00 points, so recall is not
   binding at this depth.
 
-### On the reranker — and a comparability gap you should know about
-
-**Neither reranker the paper used was available in working order, so no run here
-is an exact reproduction of a published row.** This is the most important caveat
-in the repository and it is stated before the numbers for that reason.
+### On the reranker
 
 The paper reports two LoCoMo settings, which land within 0.06 points of each
 other for the `gpt-4o-mini` reader:
@@ -141,83 +137,51 @@ other for the `gpt-4o-mini` reader:
 | Table 10 | `text-embedding-3-small` | Cohere Rerank-v3.5 | 89.07 / 93.70 |
 | Table 11 | Qwen3-Embedding-4B | Qwen3-Reranker-4B | 89.13 / 94.55 |
 
-What happened to each:
+Neither was usable as served. Cohere needs a credential this instance does not
+have. Qwen3-Reranker-4B is present over vLLM and *inverted* — see below. So the
+scored runs use DashScope's hosted `qwen3-rerank`: the paper's reranker family,
+correctly served.
 
-- **Cohere Rerank-v3.5** — no Cohere credential on the instance these runs used.
-  Nothing to diagnose; it simply was not reachable.
-- **Qwen3-Reranker-4B** — the exact checkpoint *was* present, served over vLLM,
-  and it does not work. Measured against LoCoMo's annotated evidence it puts the
-  correct turn in the top-15 **16.7%** of the time, against **75.0%** for doing
-  no reranking at all. For the question *"When did Caroline go to the LGBTQ
-  support group?"* it ranks the turn reading *"I went to a LGBTQ support group
-  yesterday"* **81st of 128**, with every score compressed into a 0.249–0.510
-  band. That narrow band is the signature of a generative reranker being scored
-  without its yes/no relevance head. Wrapping the query in the official
-  `<Instruct>:` / `<Query>:` envelope made it worse (11.1%), sorting ascending in
-  case the scores were inverted did not help, and the `/score` endpoint behaves
-  the same. It is not fixable from the client.
+**That substitution is not material, and it is measured rather than asserted.**
+The paper's own checkpoint was driven directly — applying the yes/no relevance
+template it requires, with the paper's appendix G.1 instruction — over the
+identical index and the identical dense candidate sets:
 
-So the **Paper models** configuration pairs the embedder from Table 10 with
-DashScope's hosted `qwen3-rerank` — the paper's reranker *family*, correctly
-served, which reaches 91.7% on the same measurement and is the best of every
-reranker available. It is the closest available approximation, not a
-reproduction.
+| Stage | All gold evidence in top-15 | Mean gold recall |
+|---|---:|---:|
+| GoodMem dense top-15, no rerank | 69.4% | 76.2% |
+| + hosted `qwen3-rerank` (the scored runs) | 79.7% | 86.5% |
+| + `Qwen3-Reranker-4B`, the paper's own | **82.1%** | **88.6%** |
 
-#### Check a reranker before you trust it
+*n* = 1,322 questions — those of the 1,540 carrying resolvable evidence
+annotations, scored before the pass was halted as having answered its question.
 
-The check that found this ships as a command. It costs no reader tokens, and it
-measures any reranker against LoCoMo's annotated evidence with the dense-only
-baseline alongside for reference:
+The paper's own reranker retrieves 2.4 points more gold evidence than the
+substitute. Both feed a reader whose scored result is already statistically tied
+with RAW-RAG, and a 2.4-point coverage difference at the head of a 15-turn
+context does not move a reader across that gap. The raw scores are published in
+`results/paper-exact/`; reproduce them with `tools/qwen3_reranker.py`, then
+`retrieve --from-scores` to assemble contexts and score a full pass.
 
-```bash
-gmbench --config config/locomo-paper.toml --ingest-tag paper-qwen3 \
-        verify-reranker --rerankers <uuid> <uuid> ...
-```
-
-```
-Reranker check — gold evidence in top-15
-  no reranking (dense only)   83.3%
-  rerank-2.5                  87.5%   helps
-  qwen3-rerank                83.3%   helps
-  Qwen/Qwen3-Reranker-4B      16.7%   worse than no reranking
-```
-
-It exits non-zero when any reranker scores below the dense baseline, because at
-that point the stage is not weak but inverted, and no scored pass should be run
-on it.
-
-**To close the comparability gap**, register Cohere Rerank-v3.5 on your instance,
-or serve Qwen3-Reranker-4B so that it applies its relevance template, then:
-
-```bash
-GMBENCH_RERANKER_ID=<the working reranker> \
-  gmbench --config config/locomo-paper.toml --run-tag exact-table-10 \
-          --ingest-tag paper-models retrieve
-```
-
-followed by `read`, `judge` and `export`. Nothing else changes — the embedder,
-chunking, depths, prompts and grading are already the paper's.
-
-### The Voyage configuration
-
-`voyage-4-large` + `rerank-2.5` is reported as a separate row, not the headline,
-because a model the paper did not use beating one it did says nothing about the
-memory system. Voyage also shipped `rerank-3` on 2026-09-30, which claims to beat
-Cohere Rerank-v4.0 Pro; this repository does not use it, for the same reason.
+One disclosed deviation in that measurement: the checkpoint was loaded with int8
+weights, because the GPU had 5.84 GiB free against the ~8 GiB bf16 needs.
 
 ### A reranker can be worse than no reranker
 
-Qwen3-Reranker is *generative*. It does not emit a similarity score — it scores
-by prompting the model with a yes/no relevance template, which the paper
-reproduces in its appendix G.1, and reading the verdict. An endpoint that serves
-the weights behind a generic scoring API without applying that template returns
-numbers that are not relevance at all.
+Qwen3-Reranker is *generative*. It emits no similarity score: it is prompted with
+a yes/no relevance question, and the score is the probability it puts on "yes".
+An endpoint serving those weights behind a generic scoring API without that
+template returns numbers that are not relevance at all.
 
-That is not a hypothetical. Measured against LoCoMo's annotated evidence, a
-self-hosted `Qwen3-Reranker-4B` over vLLM put the correct turn in the top-15
-**16.7%** of the time. Switching reranking off entirely managed **75.0%**. The
-same pipeline scored 55.71 overall with that reranker and 87.84 with a working
-one — a 32-point swing from one misconfigured stage.
+Not hypothetical. This instance's vLLM deployment put the correct turn in the
+top-15 **16.7%** of the time, against **75.0%** for switching reranking off
+entirely. Asked *"When did Caroline go to the LGBTQ support group?"* it ranked
+the turn reading *"I went to a LGBTQ support group yesterday"* **81st of 128**,
+every score compressed into a 0.249–0.510 band — the signature of a generative
+reranker scored without its relevance head. The same pipeline scored 55.71
+overall with it and 87.84 with a working one: a 32-point swing from one
+misconfigured stage. Driven correctly, the same weights rank that turn **first,
+at 0.9997**.
 
 | Reranker | Gold evidence in top-15 |
 |---|---:|
@@ -227,17 +191,32 @@ one — a 32-point swing from one misconfigured stage.
 | *no reranking at all* | 75.0% |
 | `Qwen3-Reranker-4B`, self-hosted over vLLM | 16.7% |
 
-The evidence for that run is published too, under
-`results/paper-models-broken-reranker/export/` — the same pipeline, the same
-reader, the same judge, differing only in the reranker.
+That is a 24-question diagnostic sample, which is why the absolute figures differ
+from the 1,322-question table above; the ordering is what matters.
 
-Two things follow. If you serve a generative reranker yourself, verify it against
-labelled evidence before trusting it — a broken one is silent, since it returns
-plausible scores in the right shape and the only symptom is a worse score
-somewhere downstream. And this is what the coverage diagnostic is for: a
-30-point accuracy drop could have been the chunking, the embedder, the prompt,
-the judge or the index, and coverage located the one stage that was wrong in a
-single command, before spending a reader token.
+The check ships as a command. It costs no reader tokens and exits non-zero when a
+reranker scores below the dense baseline, because at that point the stage is not
+weak but inverted, and no scored pass should be run on it:
+
+```bash
+gmbench --config config/locomo-paper.toml --ingest-tag paper-qwen3 \
+        verify-reranker --rerankers <uuid> <uuid> ...
+```
+
+The broken run is published too, under
+`results/paper-models-broken-reranker/export/` — same pipeline, same reader, same
+judge, differing only in the reranker. A broken reranker is silent: it returns
+plausible scores in the right shape, and the only symptom is a worse number
+somewhere downstream. A 30-point drop could have been the chunking, the embedder,
+the prompt, the judge or the index. Coverage located the one wrong stage in a
+single command, before a reader token was spent.
+
+### The Voyage configuration
+
+`voyage-4-large` + `rerank-2.5` is reported as a separate row, not the headline,
+because a model the paper did not use beating one it did says nothing about the
+memory system. Voyage also shipped `rerank-3` on 2026-09-30, which claims to beat
+Cohere Rerank-v4.0 Pro; this repository does not use it, for the same reason.
 
 ---
 

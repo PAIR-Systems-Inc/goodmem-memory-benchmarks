@@ -455,6 +455,83 @@ class GoodMemClient:
 
         return self._collect_retrieval(body)
 
+    def retrieve_dense(
+        self,
+        message: str,
+        space_id: str,
+        *,
+        candidates: int,
+        ef_search: int | None = None,
+        iterative_scan: str | None = None,
+    ) -> list[RetrievedChunk]:
+        """Returns the dense candidate set with no reranking stage.
+
+        Used when the reranker runs outside GoodMem, which is how the paper's own
+        Qwen3-Reranker-4B has to be driven: it is generative and must be prompted
+        with a yes/no relevance template, which no scoring endpoint here applies.
+        The measured pipeline is unchanged either way -- GoodMem supplies the
+        index and the dense retrieval, and the reranker sits on top of it.
+        """
+        body: dict[str, Any] = {
+            "message": message,
+            "spaceKeys": [{"spaceId": space_id}],
+            "requestedSize": candidates,
+            "fetchMemory": True,
+            "fetchMemoryContent": False,
+        }
+        hnsw: dict[str, Any] = {}
+        if ef_search:
+            hnsw["efSearch"] = ef_search
+        if iterative_scan:
+            hnsw["iterativeScan"] = iterative_scan
+        if hnsw:
+            body["hnsw"] = hnsw
+        return self._with_retries(
+            "POST /v1/memories:retrieve (dense)",
+            lambda: self._collect_dense_once(body),
+        )
+
+    def _collect_dense_once(self, body: dict[str, Any]) -> list[RetrievedChunk]:
+        """Streams a dense-only retrieve, verifying the stream completed."""
+        memories: list[dict[str, Any]] = []
+        chunks: list[RetrievedChunk] = []
+        set_id: str | None = None
+        closed = False
+
+        with self._client.stream(
+            "POST", "/v1/memories:retrieve", json=body, headers={"Accept": "text/event-stream"}
+        ) as response:
+            if response.status_code in _RETRY_STATUS:
+                response.read()
+                raise _Throttled(
+                    response.status_code, response.text[:600], _retry_after(response)
+                )
+            if response.status_code >= 400:
+                response.read()
+                raise GoodMemError(
+                    f"retrieve -> {response.status_code}: {response.text[:600]}"
+                )
+            for event in _iter_sse_data(response.iter_lines()):
+                if "resultSetBoundary" in event:
+                    boundary = event["resultSetBoundary"]
+                    if boundary.get("kind") == "BEGIN":
+                        set_id = boundary.get("resultSetId")
+                    elif boundary.get("resultSetId") and boundary["resultSetId"] == set_id:
+                        closed = True
+                elif "memoryDefinition" in event:
+                    memories.append(event["memoryDefinition"])
+                elif "retrievedItem" in event:
+                    item = event["retrievedItem"].get("chunk")
+                    if item is None:
+                        raise GoodMemError("retrieved_item carried no chunk reference")
+                    chunks.append(_to_chunk(item, memories))
+                elif "status" in event:
+                    _check_status(event["status"])
+
+        if not closed:
+            raise GoodMemError("dense retrieve stream ended before its result set closed")
+        return chunks
+
     def _collect_retrieval(self, body: dict[str, Any]) -> list[RetrievedChunk]:
         """Streams a retrieve response, retrying when throttled."""
         return self._with_retries(
