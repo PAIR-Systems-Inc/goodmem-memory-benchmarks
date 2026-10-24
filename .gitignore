@@ -1,0 +1,11 @@
+# Benchmark inputs and outputs are large and/or licensed separately.
+data/*
+!data/.gitkeep
+results/*
+!results/.gitkeep
+.env
+__pycache__/
+*.py[cod]
+.venv/
+.ruff_cache/
+.pytest_cache/
