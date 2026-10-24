@@ -211,6 +211,44 @@ def render_context(units: list[Unit]) -> str:
     return "[Knowledge Pool]\n" + "\n".join(unit.text for unit in ordered)
 
 
+def _indexed_unit_ids(
+    client: GoodMemClient, space_id: str
+) -> tuple[set[str], list[str]]:
+    """Returns the unit ids that reached COMPLETED, and failed memory ids."""
+    done: set[str] = set()
+    failed: list[str] = []
+    for memory in client.list_memories(space_id):
+        unit_id = (memory.get("metadata") or {}).get("unit_id")
+        status = memory.get("processingStatus")
+        if status == "COMPLETED":
+            if isinstance(unit_id, str):
+                done.add(unit_id)
+        elif status == "FAILED":
+            failed.append(memory["memoryId"])
+    return done, failed
+
+
+def _settle_units(
+    client: GoodMemClient, config: RunConfig, space_id: str, block: Block
+) -> None:
+    """Waits until nothing in one block's space is PENDING or PROCESSING.
+
+    A FAILED memory is a settled outcome; the repair loop decides what to do
+    about it.
+    """
+    deadline = time.monotonic() + config.ingest.ready_timeout_seconds
+    while True:
+        statuses = [m.get("processingStatus") for m in client.list_memories(space_id)]
+        in_flight = sum(s in {"PENDING", "PROCESSING"} for s in statuses)
+        if in_flight == 0:
+            return
+        if time.monotonic() > deadline:
+            raise GoodMemError(
+                f"{block.block_id}: indexing timed out with {in_flight} memories in flight"
+            )
+        time.sleep(config.ingest.ready_poll_seconds)
+
+
 def space_name(block: Block, run_tag: str) -> str:
     """Returns the space name holding one block's documents.
 
@@ -246,79 +284,99 @@ def provision_and_ingest(
     # rather than fail on the name, and should rebuild one that is incomplete
     # rather than query a partial store.
     existing = next((s for s in client.list_spaces() if s.get("name") == name), None)
+    space_id = ""
     if existing is not None:
         space_id = existing["spaceId"]
         stored = client.list_memories(space_id)
-        statuses = [m.get("processingStatus") for m in stored]
         owners = {(m.get("metadata") or {}).get("block_id") for m in stored}
         # Belt and braces: the name now carries the block id, so a mismatch
         # should be impossible. Check anyway, because the failure this guards
-        # against is invisible in the results it produces.
+        # against is invisible in the results it produces -- a space holding
+        # another block's documents is populated, COMPLETED and looks healthy.
         if owners - {block.block_id}:
             tqdm.write(
                 f"{block.block_id}: space holds other blocks {sorted(owners)}; rebuilding it"
             )
-        elif statuses.count("COMPLETED") >= len(units) and "FAILED" not in statuses:
-            tqdm.write(f"{block.source}: reusing {len(units)} facts already stored")
-            return space_id, units
-        tqdm.write(
-            f"{block.source}: existing space holds {statuses.count('COMPLETED')} of "
-            f"{len(units)} facts; rebuilding it"
-        )
-        client.delete_space(space_id)
+            client.delete_space(space_id)
+            space_id = ""
+        else:
+            # Keep it and let the repair loop fill the gaps. Rebuilding would
+            # re-embed a thousand healthy units to replace the four that failed.
+            completed = sum(m.get("processingStatus") == "COMPLETED" for m in stored)
+            if completed >= len(units):
+                tqdm.write(f"{block.source}: reusing {len(units)} facts already stored")
+                return space_id, units
+            tqdm.write(f"{block.source}: resuming at {completed} of {len(units)} units")
 
-    space = client.create_space(
-        name,
-        config.models.embedder_id,
-        chunk_size=config.chunking.chunk_size,
-        chunk_overlap=config.chunking.chunk_overlap,
-        separators=config.chunking.separators,
-        labels={"gmbench-run": config.run_tag},
-    )
-    space_id = space["spaceId"]
+    if not space_id:
+        space = client.create_space(
+            name,
+            config.models.embedder_id,
+            chunk_size=config.chunking.chunk_size,
+            chunk_overlap=config.chunking.chunk_overlap,
+            separators=config.chunking.separators,
+            labels={"gmbench-run": config.run_tag},
+        )
+        space_id = space["spaceId"]
 
     limiter = RateLimiter.per_minute(config.ingest.embed_requests_per_minute)
-    size = config.ingest.batch_size
-    requests = [
-        {
-            "spaceId": space_id,
-            "originalContent": unit.text,
-            "contentType": "text/plain",
-            "metadata": {"block_id": block.block_id, "source": block.source, **unit.metadata},
-        }
-        for unit in units
-    ]
-    with tqdm(total=len(requests), desc=f"ingest {block.source}", unit="unit") as bar:
-        for start in range(0, len(requests), size):
-            batch = requests[start : start + size]
-            limiter.acquire(len(batch))
-            results = client.batch_create_memories(batch)
-            if len(results) != len(batch):
-                raise GoodMemError(
-                    f"{block.block_id}: sent {len(batch)} units, server returned "
-                    f"{len(results)} results"
-                )
-            rejected = [r for r in results if "memory" not in r]
-            if rejected:
-                raise GoodMemError(f"{block.block_id}: {len(rejected)} units rejected")
-            bar.update(len(batch))
 
-    deadline = time.monotonic() + config.ingest.ready_timeout_seconds
-    while True:
-        statuses = [m.get("processingStatus") for m in client.list_memories(space_id)]
-        if "FAILED" in statuses:
-            raise GoodMemError(
-                f"{block.block_id}: {statuses.count('FAILED')} units failed to embed"
-            )
-        if statuses.count("COMPLETED") >= len(units):
+    # Same discipline as the LoCoMo path: a unit that fails to embed is deleted
+    # and re-created, because a partially indexed store silently depresses
+    # retrieval for every question asked of it. Raising on the first failure
+    # instead -- which this did -- turns a transient provider error into a dead
+    # run, and the provider does fail transiently under concurrent ingestion.
+    for round_index in range(config.ingest.repair_rounds + 1):
+        done, failed = _indexed_unit_ids(client, space_id)
+        for memory_id in failed:
+            client.delete_memory(memory_id)
+        missing = [unit for unit in units if unit.unit_id not in done]
+        if not missing:
             break
-        if time.monotonic() > deadline:
-            raise GoodMemError(
-                f"{block.block_id}: indexing timed out at "
-                f"{statuses.count('COMPLETED')} of {len(units)}"
-            )
-        time.sleep(config.ingest.ready_poll_seconds)
 
+        label = f"ingest {block.source}" if round_index == 0 else f"repair {block.source} #{round_index}"
+        if round_index:
+            tqdm.write(f"{label}: re-creating {len(missing)} units that did not index")
+
+        size = config.ingest.batch_size
+        requests = [
+            {
+                "spaceId": space_id,
+                "originalContent": unit.text,
+                "contentType": "text/plain",
+                "metadata": {
+                    "block_id": block.block_id,
+                    "source": block.source,
+                    **unit.metadata,
+                },
+            }
+            for unit in missing
+        ]
+        with tqdm(total=len(requests), desc=label, unit="unit") as bar:
+            for offset in range(0, len(requests), size):
+                batch = requests[offset : offset + size]
+                limiter.acquire(len(batch))
+                results = client.batch_create_memories(batch)
+                if len(results) != len(batch):
+                    raise GoodMemError(
+                        f"{block.block_id}: sent {len(batch)} units, server returned "
+                        f"{len(results)} results"
+                    )
+                rejected = [r for r in results if "memory" not in r]
+                if rejected:
+                    raise GoodMemError(f"{block.block_id}: {len(rejected)} units rejected")
+                bar.update(len(batch))
+
+        _settle_units(client, config, space_id, block)
+
+    done, _ = _indexed_unit_ids(client, space_id)
+    shortfall = [unit.unit_id for unit in units if unit.unit_id not in done]
+    if shortfall:
+        raise GoodMemError(
+            f"{block.block_id}: {len(shortfall)} of {len(units)} units still unindexed "
+            f"after {config.ingest.repair_rounds} repair rounds, e.g. {shortfall[:3]}; "
+            f"lower ingest.embed_requests_per_minute and re-run"
+        )
     return space_id, units
 
 
