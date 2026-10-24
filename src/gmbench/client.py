@@ -272,6 +272,17 @@ class GoodMemClient:
         """Counts memories in a space, optionally restricted to one processing status."""
         return len(self.list_memories(space_id, status=status))
 
+    def memory_status(self, memory_id: str) -> str:
+        """Returns one memory's processing status.
+
+        Readiness has to be checked per memory rather than by listing the
+        space: a list is O(store size), so polling it while streaming a
+        1,710-message conversation makes the measurement quadratic in the thing
+        being measured.
+        """
+        record = self._request("GET", f"/v1/memories/{memory_id}") or {}
+        return str(record.get("processingStatus") or "")
+
     def delete_memory(self, memory_id: str) -> None:
         """Deletes one memory."""
         self._request("DELETE", f"/v1/memories/{memory_id}")

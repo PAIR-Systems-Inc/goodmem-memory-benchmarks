@@ -107,3 +107,50 @@ Generated answer: {generated_answer}
 First, provide a short (one sentence) explanation of your reasoning, then finish with CORRECT or WRONG. Do NOT include both CORRECT and WRONG in your response.
 
 Just return the label CORRECT or WRONG in a json format with the key as "label"."""
+
+
+# MemoryAgentBench, appendix G.7. The reader takes the retrieved memories as a
+# system message and the source-specific task template as the user message. The
+# fact-consolidation template is reproduced verbatim, including its illustrative
+# answer, which is part of the original synthetic-knowledge instruction and
+# matters: it is what tells the reader to answer from the knowledge pool rather
+# than from the world.
+MAB_READER_SYSTEM = """You are a helpful AI. Answer the question based on query and memories.
+{context}"""
+
+MAB_READER_USER = """{task_query}
+
+Current Time: {current_time}"""
+
+MAB_FACT_CONSOLIDATION_QUERY = """Pretend you are a knowledge management system. Each fact in the knowledge pool is provided with a serial number at the beginning, and the newer fact has larger serial number.
+You need to solve the conflicts of facts in the knowledge pool by finding the newest fact with larger serial number. You need to answer a question based on this rule. You should give a very concise answer without saying other words for the question **only** from the knowledge pool you have memorized rather than the real facts in real world.
+
+For example:
+
+[Knowledge Pool]
+
+Question: Based on the provided Knowledge Pool, what is the name of the current president of Russia?
+Answer: Donald Trump
+
+Now Answer the Question: Based on the provided Knowledge Pool, {question}
+
+Answer:"""
+
+MAB_RULER_QA_QUERY = """Answer the question based on the memorized documents. Only give me the answer and do not output any other words.
+
+Now Answer the Question: {question}"""
+
+MAB_LONGMEMEVAL_QUERY = """The history chats are between you and a user. Based on the relevant chat history, answer the question as concisely as you can, using a single phrase if possible.
+
+{question}
+
+Answer:"""
+
+# Which task template each source uses.
+MAB_QUERIES: dict[str, str] = {
+    "factconsolidation_sh": MAB_FACT_CONSOLIDATION_QUERY,
+    "factconsolidation_mh": MAB_FACT_CONSOLIDATION_QUERY,
+    "ruler_qa1": MAB_RULER_QA_QUERY,
+    "ruler_qa2": MAB_RULER_QA_QUERY,
+    "longmemeval": MAB_LONGMEMEVAL_QUERY,
+}

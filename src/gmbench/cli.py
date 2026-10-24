@@ -7,9 +7,11 @@ import sys
 from pathlib import Path
 
 from rich.console import Console
+from rich.table import Table
 
 from . import config as config_module
-from . import beam, coverage, export, ingest, judge, markdown, memoryagentbench as mab
+from . import beam, coverage, export, ingest, judge, mab_run, markdown
+from . import memoryagentbench as mab
 from . import reader, report, retrieve, summary, sweep
 from .client import GoodMemClient
 from .locomo import load as load_locomo
@@ -351,6 +353,58 @@ def cmd_mab_inspect(args: argparse.Namespace, console: Console) -> int:
     return 0
 
 
+def cmd_mab(args: argparse.Namespace, console: Console) -> int:
+    """Ingests and scores one MemoryAgentBench capability group."""
+    cfg = _load(args)
+    directory = Path(args.dataset or (cfg.dataset_path.parent / "memoryagentbench"))
+    blocks = mab.load(directory)
+    total = mab.question_total(blocks)
+    if total != 2071:
+        console.print(
+            f"[yellow]Loaded {total} questions, not the published 2,071; "
+            "check the variant selection.[/yellow]"
+        )
+
+    with _client(cfg) as client:
+        outcomes = mab_run.run_capability(
+            client, cfg, blocks, args.capability, resume=not args.no_resume
+        )
+
+    document = mab_run.summarize(outcomes)
+    path = mab_run.write_summary(cfg, args.capability, document)
+
+    table = Table(title=f"MemoryAgentBench — {args.capability}, reader={cfg.models.reader_model}")
+    table.add_column("Source", style="bold")
+    table.add_column("N", justify="right")
+    table.add_column("Accuracy", justify="right")
+    table.add_column("Gold fact retrieved", justify="right")
+    table.add_column("Errors", justify="right")
+    for source, bucket in sorted(document["by_source"].items()):
+        table.add_row(
+            source,
+            str(bucket["questions"]),
+            f"{bucket['accuracy']:.2f}",
+            f"{bucket['gold_retrieval_rate']:.2f}",
+            str(bucket["errors"]) if bucket["errors"] else "-",
+        )
+    table.add_row(
+        "overall",
+        str(document["questions"]),
+        f"{document['accuracy']:.2f}",
+        "-",
+        str(document["errors"]) if document["errors"] else "-",
+        style="bold cyan",
+    )
+    console.print(table)
+    console.print(
+        "[dim]Gold fact retrieved: the share of questions where the highest-serial "
+        "fact stating a gold answer reached the reader. A wrong answer with the "
+        "gold fact present is a reading failure; without it, a retrieval one.[/dim]"
+    )
+    console.print(f"[dim]Summary written to {path}[/dim]")
+    return 1 if document["errors"] else 0
+
+
 def cmd_table(args: argparse.Namespace, console: Console) -> int:
     """Prints the README's results tables, generated from the summary files."""
     cfg = _load(args)
@@ -442,6 +496,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("drift", cmd_drift, "Check current contexts against a prior export's digests."),
         ("beam", cmd_beam, "Measure sequential ingestion cost on the BEAM 1M conversation."),
         ("mab-inspect", cmd_mab_inspect, "Report the MemoryAgentBench question selection."),
+        ("mab", cmd_mab, "Ingest and score one MemoryAgentBench capability group."),
         ("table", cmd_table, "Print the README results tables from run summaries."),
         ("run", cmd_run, "Ingest, retrieve, read and judge in one go."),
     ):
@@ -476,6 +531,21 @@ def build_parser() -> argparse.ArgumentParser:
                 type=int,
                 default=1,
                 help="Readiness check cadence in messages; 1 matches the paper.",
+            )
+        if name == "mab":
+            child.add_argument(
+                "--capability",
+                default="conflict_resolution",
+                choices=[
+                    "conflict_resolution",
+                    "accurate_retrieval",
+                    "test_time_learning",
+                    "long_range_understanding",
+                ],
+                help="Which capability group to run (default: conflict_resolution).",
+            )
+            child.add_argument(
+                "--dataset", default=None, help="MemoryAgentBench dataset root."
             )
         if name == "mab-inspect":
             child.add_argument(

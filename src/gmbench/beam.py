@@ -67,9 +67,10 @@ class Conversation:
         """A rough token count, four characters per token.
 
         Deliberately rough: the point of this benchmark is elapsed time against
-        context length, and the paper's own x-axis is approximate. A real
-        tokenizer count for this conversation is about 971k against the ~950k
-        this estimate gives, so it is close enough to label an axis and not
+        context length, and the paper's own x-axis is approximate. For the
+        paper's conversation this estimate gives about 1.06M against a real
+        o200k tokenizer count of 970,963 -- a 9% overshoot, because the corpus
+        is heavy with code and markdown. Close enough to label an axis, not
         close enough to quote as a measurement.
         """
         return sum(len(message.content) for message in self.messages) // 4
@@ -141,34 +142,37 @@ class Tick:
 
 
 def _wait_ready(
-    client: GoodMemClient, space_id: str, expected: int, timeout_seconds: float
+    client: GoodMemClient, memory_id: str, timeout_seconds: float
 ) -> float:
-    """Blocks until the space reports ``expected`` completed memories.
+    """Blocks until one memory reports COMPLETED.
+
+    Args:
+      client: Connected GoodMem client.
+      memory_id: The memory just created.
+      timeout_seconds: How long to wait before giving up.
 
     Returns:
       Seconds spent waiting.
 
     Raises:
-      GoodMemError: On timeout, or if a memory failed to embed.
+      GoodMemError: On timeout, or if the memory failed to embed. A failure is
+        fatal rather than skipped: ingestion cost measured against a store that
+        is quietly missing messages is not the quantity being reported.
     """
     started = time.monotonic()
     deadline = started + timeout_seconds
     while True:
-        statuses = [
-            memory.get("processingStatus") for memory in client.list_memories(space_id)
-        ]
-        if "FAILED" in statuses:
-            raise GoodMemError(
-                f"a memory failed to embed after {statuses.count('COMPLETED')} completed; "
-                "ingestion cost cannot be measured against a partial store"
-            )
-        if statuses.count("COMPLETED") >= expected:
+        status = client.memory_status(memory_id)
+        if status == "COMPLETED":
             return time.monotonic() - started
+        if status == "FAILED":
+            raise GoodMemError(f"memory {memory_id} failed to embed")
         if time.monotonic() > deadline:
             raise GoodMemError(
-                f"readiness timed out at {statuses.count('COMPLETED')} of {expected}"
+                f"memory {memory_id} still {status or 'unknown'} after "
+                f"{timeout_seconds:.0f}s"
             )
-        time.sleep(0.25)
+        time.sleep(0.05)
 
 
 def measure(
@@ -218,12 +222,13 @@ def measure(
             results = client.batch_create_memories([body])
             if len(results) != 1 or "memory" not in results[0]:
                 raise GoodMemError(f"message {message.index} was not accepted: {results}")
+            memory_id = results[0]["memory"]["memoryId"]
             add_seconds = time.monotonic() - add_started
 
             ready_seconds = 0.0
             if position % poll_every == 0 or position == len(messages):
                 ready_seconds = _wait_ready(
-                    client, space_id, position, config.ingest.ready_timeout_seconds
+                    client, memory_id, config.ingest.ready_timeout_seconds
                 )
 
             cumulative_chars += len(message.content)

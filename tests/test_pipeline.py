@@ -741,3 +741,83 @@ def test_beam_renders_the_session_anchor_only_where_present() -> None:
     assert anchored[0].render().startswith("[March-01-2024] user:")
     plain = next(m for m in conversation.messages if not m.time_anchor)
     assert plain.render().startswith(f"{plain.role}:")
+
+
+# -- MemoryAgentBench scoring --------------------------------------------
+
+
+def test_substring_scoring_accepts_any_gold_paraphrase() -> None:
+    """RULER ships four paraphrases per question; any of them counts."""
+    from gmbench.mab_run import score
+
+    assert score("The answer is pesapallo.", ["pesapallo"])
+    assert score("10th and 11th centuries", ["in the 10th and 11th centuries", "10th and 11th centuries"])
+    assert score("  PESAPALLO  ", ["pesapallo"]), "matching is case-insensitive"
+    assert score("the  10th   and 11th centuries", ["10th and 11th centuries"]), (
+        "whitespace is normalised"
+    )
+
+
+def test_substring_scoring_rejects_a_miss_and_an_empty_prediction() -> None:
+    from gmbench.mab_run import score
+
+    assert not score("ice hockey", ["pesapallo"])
+    assert not score("", ["pesapallo"])
+    assert not score("   ", ["pesapallo"])
+    assert not score("anything", [])
+
+
+def test_gold_serial_picks_the_newest_fact_stating_the_answer() -> None:
+    """Precedence is the whole task: the authoritative fact is the latest one."""
+    from gmbench.mab_run import gold_serial_for
+    from gmbench.memoryagentbench import Unit
+
+    units = [
+        Unit("f-1", "1. goaltender is associated with the sport of ice hockey.", 0, 1),
+        Unit("f-2", "99. something irrelevant.", 1, 99),
+        Unit("f-3", "223. goaltender is associated with the sport of pesapallo.", 2, 223),
+        Unit("f-4", "310. goaltender is associated with the sport of pesapallo.", 3, 310),
+    ]
+    assert gold_serial_for(units, ["pesapallo"]) == 310
+    assert gold_serial_for(units, ["ice hockey"]) == 1
+    assert gold_serial_for(units, ["cricket"]) is None
+
+
+def test_knowledge_pool_is_rendered_in_serial_order() -> None:
+    """The reader is told a larger serial is newer, so order must carry that."""
+    from gmbench.mab_run import render_context
+    from gmbench.memoryagentbench import Unit
+
+    units = [
+        Unit("c", "310. newest.", 0, 310),
+        Unit("a", "1. oldest.", 1, 1),
+        Unit("b", "223. middle.", 2, 223),
+    ]
+    rendered = render_context(units)
+    assert rendered.startswith("[Knowledge Pool]")
+    assert rendered.index("1. oldest.") < rendered.index("223. middle.")
+    assert rendered.index("223. middle.") < rendered.index("310. newest.")
+
+
+def test_summary_separates_a_reading_failure_from_a_retrieval_one() -> None:
+    """Accuracy alone cannot tell those apart, so attribution is tracked."""
+    from gmbench.mab_run import Outcome, summarize
+
+    outcomes = [
+        # Gold fact retrieved and answered: a clean pass.
+        Outcome("q1", "factconsolidation_sh", "conflict_resolution", "?", ["a"],
+                "a", True, [1, 310], 310),
+        # Gold fact retrieved but the reader chose an older one: a reading failure.
+        Outcome("q2", "factconsolidation_sh", "conflict_resolution", "?", ["b"],
+                "wrong", False, [2, 400], 400),
+        # Gold fact never retrieved: a retrieval failure.
+        Outcome("q3", "factconsolidation_sh", "conflict_resolution", "?", ["c"],
+                "wrong", False, [5, 6], 900),
+    ]
+    document = summarize(outcomes)
+    bucket = document["by_source"]["factconsolidation_sh"]
+    assert bucket["questions"] == 3
+    assert bucket["accuracy"] == pytest.approx(100 / 3)
+    assert bucket["gold_retrieved"] == 2
+    assert bucket["gold_retrieval_rate"] == pytest.approx(200 / 3)
+    assert document["errors"] == 0
