@@ -15,17 +15,20 @@ comparison further.
 
 | Configuration | Reader | GoodMem | 95% CI | RAW-RAG | vs RAW-RAG | Best agentic | vs best agentic |
 |---|---|---:|---|---:|---|---:|---|
-| Paper models | `gpt-4.1-mini` | **93.23** | [91.99, 94.42] | 93.70 | tie (-0.47) | 91.69 | ahead (+1.54) |
-| Paper models | `gpt-4o-mini` | **88.72** | [87.19, 90.24] | 89.07 | tie (-0.35) | 88.12 | tie (+0.60) |
+| Hosted substitute | `gpt-4.1-mini` | **93.23** | [91.99, 94.42] | 93.70 | tie (-0.47) | 91.69 | ahead (+1.54) |
+| Hosted substitute | `gpt-4o-mini` | **88.72** | [87.19, 90.24] | 89.07 | tie (-0.35) | 88.12 | tie (+0.60) |
+| Paper reranker | `gpt-4.1-mini` | **93.42** | [92.19, 94.59] | 93.70 | tie (-0.28) | 91.69 | ahead (+1.73) |
+| Paper reranker | `gpt-4o-mini` | **88.66** | [87.10, 90.17] | 89.07 | tie (-0.41) | 88.12 | tie (+0.54) |
 | Voyage | `gpt-4.1-mini` | **94.29** | [93.14, 95.37] | 93.70 | tie (+0.59) | 91.69 | ahead (+2.60) |
 | Voyage | `gpt-4o-mini` | **87.84** | [86.19, 89.37] | 89.07 | tie (-1.23) | 88.12 | tie (-0.28) |
 
 ## Configurations
 
-- **Paper models** — embedder `text-embedding-3-small`, reranker `qwen3-rerank`, 128 dense candidates to top-15
+- **Hosted substitute** — embedder `text-embedding-3-small`, reranker `qwen3-rerank`, 128 dense candidates to top-15
+- **Paper reranker** — embedder `voyage-4-large`, reranker `Qwen/Qwen3-Reranker-4B`, 128 dense candidates to top-15
 - **Voyage** — embedder `voyage-4-large`, reranker `rerank-2.5`, 128 dense candidates to top-30
 
-## Paper models — `gpt-4.1-mini`
+## Hosted substitute — `gpt-4.1-mini`
 
 | Category | N | GoodMem | 95% CI | RAW-RAG | Best agentic | Verdict |
 |---|---:|---:|---|---:|---:|---|
@@ -39,7 +42,7 @@ Mean evidence supplied to the reader: 62 turns, 10,775 characters (~2,694 tokens
 
 Integrity: clean (1540 questions scored).
 
-## Paper models — `gpt-4o-mini`
+## Hosted substitute — `gpt-4o-mini`
 
 | Category | N | GoodMem | 95% CI | RAW-RAG | Best agentic | Verdict |
 |---|---:|---:|---|---:|---:|---|
@@ -50,6 +53,34 @@ Integrity: clean (1540 questions scored).
 | **Overall** | 1540 | 88.72 | [87.19, 90.24] | 89.07 | 88.12 | tie (-0.35) |
 
 Mean evidence supplied to the reader: 62 turns, 10,775 characters (~2,694 tokens).
+
+Integrity: clean (1540 questions scored).
+
+## Paper reranker — `gpt-4.1-mini`
+
+| Category | N | GoodMem | 95% CI | RAW-RAG | Best agentic | Verdict |
+|---|---:|---:|---|---:|---:|---|
+| Single-hop | 841 | 96.16 | [94.81, 97.34] | 96.79 | 95.12 | tie (-0.63) |
+| Multi-hop | 282 | 92.43 | [89.36, 95.27] | 92.32 | 88.30 | tie (+0.11) |
+| Temporal | 321 | 91.90 | [88.68, 94.70] | 90.86 | 91.59 | tie (+1.04) |
+| Open-domain | 96 | 77.43 | [69.10, 85.07] | 80.21 | 76.04 | tie (-2.78) |
+| **Overall** | 1540 | 93.42 | [92.19, 94.59] | 93.70 | 91.69 | tie (-0.28) |
+
+Mean evidence supplied to the reader: 60 turns, 10,874 characters (~2,718 tokens).
+
+Integrity: CONTAMINATED (1540 questions scored).
+
+## Paper reranker — `gpt-4o-mini`
+
+| Category | N | GoodMem | 95% CI | RAW-RAG | Best agentic | Verdict |
+|---|---:|---:|---|---:|---:|---|
+| Single-hop | 841 | 94.49 | [92.91, 95.96] | 94.57 | 93.94 | tie (-0.08) |
+| Multi-hop | 282 | 86.76 | [82.74, 90.43] | 85.93 | 84.04 | tie (+0.83) |
+| Temporal | 321 | 79.02 | [74.56, 83.28] | 82.04 | 80.69 | tie (-3.02) |
+| Open-domain | 96 | 75.35 | [67.01, 83.68] | 73.61 | 73.96 | tie (+1.74) |
+| **Overall** | 1540 | 88.66 | [87.10, 90.17] | 89.07 | 88.12 | tie (-0.41) |
+
+Mean evidence supplied to the reader: 60 turns, 10,874 characters (~2,718 tokens).
 
 Integrity: clean (1540 questions scored).
 

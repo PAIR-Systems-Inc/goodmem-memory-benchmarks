@@ -10,7 +10,7 @@ from rich.console import Console
 from rich.table import Table
 
 from . import config as config_module
-from . import beam, coverage, export, ingest, judge, mab_run, markdown
+from . import beam, coverage, exact_reranker, export, ingest, judge, mab_run, markdown
 from . import memoryagentbench as mab
 from . import reader, report, retrieve, summary, sweep
 from .client import GoodMemClient
@@ -269,9 +269,13 @@ def _emit(
     expected = _expected_qids(cfg, args)
     records = retrieve.load_records(cfg, expected)
     with _client(cfg) as client:
+        recorded = exact_reranker.read_provenance(cfg.run_dir)
         models = {
             "embedder": client.describe_model("embedders", cfg.models.embedder_id),
-            "reranker": client.describe_model("rerankers", cfg.models.reranker_id),
+            # A run reranked outside GoodMem must not be described by the
+            # reranker left in its config, which was never called.
+            "reranker": recorded
+            or client.describe_model("rerankers", cfg.models.reranker_id),
         }
     document = summary.build(cfg, records, answers, judgements, models)
     path = summary.write(cfg, document)

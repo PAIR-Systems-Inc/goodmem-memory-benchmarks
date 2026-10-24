@@ -71,6 +71,46 @@ def scores_path(run_dir: Path) -> Path:
     return run_dir / "rerank-scores.jsonl"
 
 
+def provenance_path(run_dir: Path) -> Path:
+    return run_dir / "reranker-provenance.json"
+
+
+# What the scores in this run were produced by. Written when contexts are
+# assembled from an external reranker, and read when the summary is built.
+EXTERNAL_RERANKER = {
+    "provider": "EXTERNAL",
+    "model": "Qwen/Qwen3-Reranker-4B",
+    "display_name": "Qwen3-Reranker-4B, driven directly (paper table 11)",
+    "note": (
+        "Scored outside GoodMem by tools/qwen3_reranker.py, applying the "
+        "yes/no relevance template the checkpoint requires with the paper's "
+        "appendix G.1 instruction. int8 weights. GoodMem supplied the index "
+        "and the dense top-128."
+    ),
+}
+
+
+def write_provenance(run_dir: Path, scorer: dict[str, Any] | None = None) -> Path:
+    """Records which reranker produced this run's ranking.
+
+    Without this the summary describes the reranker named in the config, which
+    for an externally reranked run is a model that was never called -- a false
+    provenance record in the one file a reader checks.
+    """
+    path = provenance_path(run_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(scorer or EXTERNAL_RERANKER, indent=2) + "\n")
+    return path
+
+
+def read_provenance(run_dir: Path) -> dict[str, Any] | None:
+    """Returns the recorded reranker for this run, or None if ranked in GoodMem."""
+    path = provenance_path(run_dir)
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
+
+
 def write_candidates(path: Path, rows: list[Candidates]) -> None:
     """Writes the candidate sets for an external reranker to score."""
     path.parent.mkdir(parents=True, exist_ok=True)

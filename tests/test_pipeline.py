@@ -1437,3 +1437,24 @@ def test_mab_overall_verdict_follows_the_sign(tmp_path) -> None:
     overall = [ln for ln in mab_section(tmp_path) if "**Overall**" in ln]
     assert len(overall) == 1
     assert "ahead (+5.00)" in overall[0], overall[0]
+
+
+def test_an_externally_reranked_run_is_not_described_by_its_config(tmp_path) -> None:
+    """The summary must name the reranker that actually ranked the results.
+
+    A --from-scores run is ranked outside GoodMem, but the summary described
+    whatever reranker was left in the config. That produced a published record
+    reading "VOYAGE rerank-2.5" for a run ranked by Qwen3-Reranker-4B -- a false
+    provenance claim in the one file a reader checks.
+    """
+    from gmbench.exact_reranker import EXTERNAL_RERANKER, read_provenance, write_provenance
+
+    assert read_provenance(tmp_path) is None, "absent provenance must not be invented"
+
+    write_provenance(tmp_path)
+    recorded = read_provenance(tmp_path)
+
+    assert recorded is not None
+    assert recorded["model"] == EXTERNAL_RERANKER["model"]
+    assert "Qwen3-Reranker-4B" in recorded["display_name"]
+    assert "int8" in recorded["note"], "the disclosed deviation must travel with it"

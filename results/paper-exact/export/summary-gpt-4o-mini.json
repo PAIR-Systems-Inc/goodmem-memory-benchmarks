@@ -1,0 +1,87 @@
+{
+  "benchmark": "locomo",
+  "run_tag": "paper-exact",
+  "ingest_tag": "paper-qwen3",
+  "reader_model": "gpt-4o-mini",
+  "judge_model": "gpt-4o-mini-2024-07-18",
+  "judge_repetitions": 3,
+  "embedder": {
+    "provider": "VOYAGE",
+    "model": "voyage-4-large",
+    "display_name": "Voyage 4 Large"
+  },
+  "reranker": {
+    "provider": "VOYAGE",
+    "model": "rerank-2.5",
+    "display_name": "voyage-rerank-2.5"
+  },
+  "retrieval": {
+    "dense_candidates": 128,
+    "final_k": 15,
+    "neighbor_turns": 2,
+    "ef_search": 400,
+    "iterative_scan": "ITERATIVE_SCAN_RELAXED_ORDER"
+  },
+  "chunking": {
+    "chunk_size": 1500,
+    "chunk_overlap": 150,
+    "length_measurement": "CHARACTER_COUNT"
+  },
+  "evidence": {
+    "mean_chars": 10873.56038961039,
+    "mean_turns": 60.4474025974026
+  },
+  "integrity": {
+    "questions": 1540,
+    "reader_errors": 0,
+    "reader_truncated": 0,
+    "reader_missing_final_marker": 0,
+    "judge_infrastructure_failures": 0,
+    "judge_unparseable": 0,
+    "judgements_expected": 4620,
+    "judgements_present": 4620,
+    "clean": true,
+    "problems": []
+  },
+  "scores": [
+    {
+      "slice": "multi_hop",
+      "questions": 282,
+      "accuracy": 86.76122931442079,
+      "ci_low": 82.74231678486998,
+      "ci_high": 90.42553191489361
+    },
+    {
+      "slice": "open_domain",
+      "questions": 96,
+      "accuracy": 75.34722222222221,
+      "ci_low": 67.01388888888889,
+      "ci_high": 83.68055555555556
+    },
+    {
+      "slice": "single_hop",
+      "questions": 841,
+      "accuracy": 94.49068569163693,
+      "ci_low": 92.90527150217996,
+      "ci_high": 95.95719381688465
+    },
+    {
+      "slice": "temporal",
+      "questions": 321,
+      "accuracy": 79.02388369678089,
+      "ci_low": 74.55867082035307,
+      "ci_high": 83.28141225337487
+    },
+    {
+      "slice": "overall",
+      "questions": 1540,
+      "accuracy": 88.65800865800864,
+      "ci_low": 87.09956709956708,
+      "ci_high": 90.17316017316018
+    }
+  ],
+  "bootstrap": {
+    "resamples": 10000,
+    "seed": 20261023
+  }
+}

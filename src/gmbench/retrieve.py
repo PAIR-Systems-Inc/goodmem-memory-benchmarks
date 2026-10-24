@@ -363,6 +363,7 @@ def assemble_from_scores(
     scores = exact_reranker.read_scores(
         scores_file or exact_reranker.scores_path(config.run_dir), candidates
     )
+    exact_reranker.write_provenance(config.run_dir)
 
     path = records_path(config)
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -12,10 +12,14 @@ agentic memory systems it was compared against.
 
 | Benchmark | GoodMem | RAW-RAG | |
 |---|---:|---:|---|
-| LoCoMo, `gpt-4.1-mini` | 93.23 | 93.70 | statistical tie, ahead of best agentic (91.69) |
-| LoCoMo, `gpt-4o-mini` | 88.72 | 89.07 | statistical tie |
+| LoCoMo, `gpt-4.1-mini` | 93.42 | 93.70 | statistical tie, ahead of best agentic (91.69) |
+| LoCoMo, `gpt-4o-mini` | 88.66 | 89.07 | statistical tie |
 | MemoryAgentBench | 51.44 | 48.32 | ahead on three of four capability groups |
 | BEAM-1M ingest | 3.004 s/message | — | flat from 0 to 1M tokens |
+
+The LoCoMo rows use the paper's own embedder and its own reranker — the exact
+`Qwen3-Reranker-4B` checkpoint from its table 11 — so they are directly
+comparable to the published figures.
 
 On LoCoMo this is parity and nothing more: the differences are smaller than this
 measurement's own 0.7-point noise floor, and a repository that read them as a win
@@ -69,22 +73,35 @@ by `gmbench table` from the run summaries rather than typed by hand. The per-que
 
 | Configuration | Reader | GoodMem | 95% CI | RAW-RAG | Best agentic |
 |---|---|---:|---|---:|---:|
-| Paper models | `gpt-4o-mini` | 88.72 | [87.19, 90.24] | 89.07 — tie | 88.12 — tie |
-| Paper models | `gpt-4.1-mini` | 93.23 | [91.99, 94.42] | 93.70 — tie | 91.69 — **ahead** |
+| **Paper models, paper reranker** | `gpt-4o-mini` | 88.66 | [87.10, 90.17] | 89.07 — tie | 88.12 — tie |
+| **Paper models, paper reranker** | `gpt-4.1-mini` | 93.42 | [92.19, 94.59] | 93.70 — tie | 91.69 — **ahead** |
+| Paper models, hosted substitute | `gpt-4o-mini` | 88.72 | [87.19, 90.24] | 89.07 — tie | 88.12 — tie |
+| Paper models, hosted substitute | `gpt-4.1-mini` | 93.23 | [91.99, 94.42] | 93.70 — tie | 91.69 — **ahead** |
 | Voyage | `gpt-4o-mini` | 87.84 | [86.19, 89.37] | 89.07 — tie | 88.12 — tie |
 | Voyage | `gpt-4.1-mini` | **94.29** | [93.14, 95.37] | 93.70 — tie | 91.69 — **ahead** |
 
-Statistically tied with RAW-RAG in all four, and ahead of MemMachine — the
-strongest agentic system in the paper's comparison — on both `gpt-4.1-mini` rows.
-The paper-models configuration reaches that on **~2,700 evidence tokens against
-the paper's ~4,800**, a little over half the context budget.
+The first two rows are the comparable ones: the paper's embedder
+(`text-embedding-3-small`) and the paper's own reranker checkpoint
+(`Qwen/Qwen3-Reranker-4B`, table 11), driven directly because no endpoint here
+serves it correctly. The substitute rows are kept because the pair answers a
+question worth answering — see below.
 
-> **One caveat.** Neither reranker the paper used was usable as served here, so
-> the scored rows pair the paper's embedder with its reranker *family* rather than
-> its exact checkpoint. That substitution is measured, not assumed: the paper's own
-> `Qwen3-Reranker-4B`, driven correctly over the identical index, retrieves 2.4
-> points more gold evidence — not enough to move a reader across a tie. See
-> [On the reranker](#on-the-reranker). Cohere Rerank-v3.5 remains unmeasured.
+Statistically tied with RAW-RAG in all six, and ahead of MemMachine — the
+strongest agentic system in the paper's comparison — on every `gpt-4.1-mini`
+row. The paper-models configurations reach that on **~2,700 evidence tokens
+against the paper's ~4,800**, a little over half the context budget.
+
+One integrity note on the paper-reranker `gpt-4.1-mini` row: 2 of its 1,540
+reader answers hit the token cap and emitted no `FINAL ANSWER:` marker, so the
+whole response was graded for those two. The run is therefore flagged
+contaminated by this harness's own gate rather than reported as clean. The other
+five rows are clean, 4,620 judgements each, no reader or judge failures.
+
+> **One gap remains.** Cohere Rerank-v3.5, the reranker in the paper's table 10,
+> has never been run here: this instance has no Cohere credential. Table 11's
+> `Qwen3-Reranker-4B` is scored above, and the two published settings land within
+> 0.06 points of each other for `gpt-4o-mini`, so the unmeasured one is unlikely
+> to say anything different — but it is unmeasured, not equivalent.
 
 ### How to read a verdict
 
@@ -153,15 +170,35 @@ other for the `gpt-4o-mini` reader:
 | Table 10 | `text-embedding-3-small` | Cohere Rerank-v3.5 | 89.07 / 93.70 |
 | Table 11 | Qwen3-Embedding-4B | Qwen3-Reranker-4B | 89.13 / 94.55 |
 
-Neither was usable as served. Cohere needs a credential this instance does not
-have. Qwen3-Reranker-4B is present over vLLM and *inverted* — see below. So the
-scored runs use DashScope's hosted `qwen3-rerank`: the paper's reranker family,
-correctly served.
+Table 11's checkpoint is now scored end to end. Neither reranker was usable *as
+served*: Cohere needs a credential this instance does not have, and
+Qwen3-Reranker-4B is present over vLLM and *inverted* — see below. So the
+checkpoint is driven directly instead, by `tools/qwen3_reranker.py`, applying the
+yes/no relevance template it requires with the paper's appendix G.1 instruction.
 
-**That substitution is not material, and it is measured rather than asserted.**
-The paper's own checkpoint was driven directly — applying the yes/no relevance
-template it requires, with the paper's appendix G.1 instruction — over the
-identical index and the identical dense candidate sets:
+This changes nothing about what is measured. The paper's pipeline is index →
+dense retrieve → rerank → read, and GoodMem supplies the index and the dense
+retrieval whether the reranker sits inside its post-processor or beside it. One
+disclosed deviation: int8 weights, the GPU having 5.84 GiB free against the
+~8 GiB bf16 needs.
+
+**The substitute rows are kept, because the pair measures what a substitution is
+worth.** Same index, same dense candidates, only the reranker differing:
+
+| Reranker | `gpt-4o-mini` | `gpt-4.1-mini` |
+|---|---:|---:|
+| `Qwen3-Reranker-4B`, the paper's own | 88.66 | 93.42 |
+| hosted `qwen3-rerank`, the family | 88.72 | 93.23 |
+| difference | −0.06 | +0.19 |
+
+Both differences are an order of magnitude inside this measurement's own
+0.67-point noise floor. Swapping the exact checkpoint for its correctly served
+family moved the score by less than re-running the same configuration twice
+does. That is a useful thing to know about reranker choice, and it is only
+knowable because both were run.
+
+The retrieval difference underneath those scores is larger than the score
+difference, which is the point:
 
 | Stage | All gold evidence in top-15 | Mean gold recall |
 |---|---:|---:|
@@ -173,14 +210,15 @@ identical index and the identical dense candidate sets:
 annotations, scored before the pass was halted as having answered its question.
 
 The paper's own reranker retrieves 2.4 points more gold evidence than the
-substitute. Both feed a reader whose scored result is already statistically tied
-with RAW-RAG, and a 2.4-point coverage difference at the head of a 15-turn
-context does not move a reader across that gap. The raw scores are published in
-`results/paper-exact/`; reproduce them with `tools/qwen3_reranker.py`, then
-`retrieve --from-scores` to assemble contexts and score a full pass.
+substitute, and that 2.4 points of coverage turned into 0.06 and 0.19 points of
+accuracy. Evidence coverage at the head of a 15-turn context has steeply
+diminishing returns once the answer is present at all.
 
-One disclosed deviation in that measurement: the checkpoint was loaded with int8
-weights, because the GPU had 5.84 GiB free against the ~8 GiB bf16 needs.
+The scores are published in `results/paper-exact/`, which also carries a
+`reranker-provenance.json` naming what actually produced the ranking — the
+summary would otherwise describe the reranker left in the config, a model that
+was never called. Reproduce with `tools/qwen3_reranker.py`, then
+`retrieve --from-scores`, `read` and `judge`.
 
 ### A reranker can be worse than no reranker
 
