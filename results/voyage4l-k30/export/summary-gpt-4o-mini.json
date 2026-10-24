@@ -20,8 +20,8 @@
     "length_measurement": "CHARACTER_COUNT"
   },
   "evidence": {
-    "mean_chars": 19400.72987012987,
-    "mean_turns": 106.6077922077922
+    "mean_chars": 19386.231168831167,
+    "mean_turns": 106.53961038961039
   },
   "integrity": {
     "questions": 1540,
@@ -39,37 +39,37 @@
     {
       "slice": "multi_hop",
       "questions": 282,
-      "accuracy": 88.65248226950355,
-      "ci_low": 84.86997635933807,
-      "ci_high": 92.19858156028369
+      "accuracy": 86.99763593380615,
+      "ci_low": 82.97872340425532,
+      "ci_high": 90.66193853427895
     },
     {
       "slice": "open_domain",
       "questions": 96,
-      "accuracy": 70.48611111111111,
-      "ci_low": 61.458333333333336,
+      "accuracy": 70.83333333333333,
+      "ci_low": 61.805555555555564,
       "ci_high": 79.51388888888889
     },
     {
       "slice": "single_hop",
       "questions": 841,
-      "accuracy": 94.29250891795482,
-      "ci_low": 92.6674593737614,
-      "ci_high": 95.79865239793895
+      "accuracy": 94.53032104637336,
+      "ci_low": 92.9845422116528,
+      "ci_high": 95.9968291716211
     },
     {
       "slice": "temporal",
       "questions": 321,
-      "accuracy": 78.6085150571132,
-      "ci_low": 74.03946002076843,
-      "ci_high": 82.86604361370716
+      "accuracy": 76.11630321910697,
+      "ci_low": 71.44340602284528,
+      "ci_high": 80.5815160955348
     },
     {
       "slice": "overall",
       "questions": 1540,
-      "accuracy": 88.50649350649351,
-      "ci_low": 86.92640692640694,
-      "ci_high": 90.04329004329006
+      "accuracy": 87.83549783549785,
+      "ci_low": 86.19047619047618,
+      "ci_high": 89.37229437229436
     }
   ],
   "bootstrap": {
