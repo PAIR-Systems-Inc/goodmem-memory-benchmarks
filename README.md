@@ -1,6 +1,7 @@
 # GoodMem memory benchmarks
 
-Reproducing the experiments in [arXiv:2610.30755](https://arxiv.org/abs/2610.30755) with
+Reproducing the experiments in [*Is Complex Agentic Memory Always Needed? Naive
+RAG Is Stronger Than We Thought*](https://arxiv.org/abs/2610.30755) with
 [GoodMem](https://github.com/PAIR-Systems-Inc/goodmem) as the context layer.
 
 The paper asks how far retrieval over raw conversation history can go. This
