@@ -41,6 +41,12 @@ def stratified_sample(
 ) -> list[tuple[Conversation, Question]]:
     """Samples questions spread evenly across conversations and categories.
 
+    Even sampling deliberately over-weights the hard categories relative to
+    their true share -- LoCoMo is 841 single-hop against 92 open-domain -- which
+    sharpens the tuning signal where the headroom actually is. The consequence
+    is that sweep coverage is not comparable to a full-set number: use it to
+    rank configurations, then re-run the winner over everything.
+
     Args:
       conversations: Conversations to sample from.
       size: Target number of questions; the whole set is used if smaller.

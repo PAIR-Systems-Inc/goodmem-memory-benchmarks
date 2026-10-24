@@ -16,20 +16,25 @@ from .locomo import load as load_locomo
 _DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "locomo.toml"
 
 
+def _replace(cfg: config_module.RunConfig, **changes: object) -> config_module.RunConfig:
+    """Returns a copy of the frozen run config with the given fields replaced."""
+    fields = {name: getattr(cfg, name) for name in cfg.__dataclass_fields__}
+    fields.update(changes)
+    return config_module.RunConfig(**fields)  # type: ignore[arg-type]
+
+
 def _load(args: argparse.Namespace) -> config_module.RunConfig:
     cfg = config_module.load(args.config, run_tag=args.run_tag)
+    if getattr(args, "ingest_tag", None):
+        cfg = _replace(cfg, ingest_tag=args.ingest_tag)
     if getattr(args, "reader_model", None):
-        cfg = config_module.RunConfig(
+        models = config_module.ModelConfig(
             **{
-                **{f: getattr(cfg, f) for f in cfg.__dataclass_fields__},
-                "models": config_module.ModelConfig(
-                    **{
-                        **{f: getattr(cfg.models, f) for f in cfg.models.__dataclass_fields__},
-                        "reader_model": args.reader_model,
-                    }
-                ),
+                **{f: getattr(cfg.models, f) for f in cfg.models.__dataclass_fields__},
+                "reader_model": args.reader_model,
             }
         )
+        cfg = _replace(cfg, models=models)
     return cfg
 
 
@@ -180,6 +185,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--config", type=Path, default=_DEFAULT_CONFIG, help="Path to the run TOML."
     )
     parser.add_argument("--run-tag", default=None, help="Overrides the configured run tag.")
+    parser.add_argument(
+        "--ingest-tag",
+        default=None,
+        help="Reuse the spaces ingested under this tag instead of this run's own.",
+    )
     parser.add_argument(
         "--reader-model", default=None, help="Overrides the configured reader model."
     )

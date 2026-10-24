@@ -102,6 +102,7 @@ class RunConfig:
     """Everything one benchmark run needs."""
 
     run_tag: str
+    ingest_tag: str
     dataset_path: Path
     results_dir: Path
     server: ServerConfig
@@ -116,7 +117,18 @@ class RunConfig:
 
     @property
     def run_dir(self) -> Path:
+        """Where this run's retrievals, answers and judgements are written."""
         return self.results_dir / self.run_tag
+
+    @property
+    def ingest_dir(self) -> Path:
+        """Where the space manifest lives.
+
+        Spaces are a property of what was ingested, not of how it is retrieved,
+        so several retrieval runs can share one ingest by pointing at the same
+        ingest tag instead of re-uploading thousands of turns.
+        """
+        return self.results_dir / self.ingest_tag
 
 
 def _dataclass_from(cls: type, table: dict[str, Any]) -> Any:
@@ -148,8 +160,10 @@ def load(path: Path, *, run_tag: str | None = None) -> RunConfig:
     dataset = Path(run.get("dataset_path", "data/locomo10.json"))
     results = Path(run.get("results_dir", "results"))
 
+    resolved_tag = run_tag or run.get("run_tag", "dev")
     return RunConfig(
-        run_tag=run_tag or run.get("run_tag", "dev"),
+        run_tag=resolved_tag,
+        ingest_tag=run.get("ingest_tag") or resolved_tag,
         dataset_path=dataset if dataset.is_absolute() else root / dataset,
         results_dir=results if results.is_absolute() else root / results,
         server=ServerConfig.from_env(doc.get("server", {})),

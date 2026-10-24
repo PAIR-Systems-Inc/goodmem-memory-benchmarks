@@ -37,7 +37,8 @@ class SpaceBinding:
 
 
 def manifest_path(config: RunConfig) -> Path:
-    return config.run_dir / "spaces.json"
+    """Returns the space-manifest path, which is keyed to the ingest, not the run."""
+    return config.ingest_dir / "spaces.json"
 
 
 def load_manifest(config: RunConfig) -> dict[str, SpaceBinding]:

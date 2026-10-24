@@ -99,10 +99,24 @@ Useful flags: `--run-tag` to keep runs separate, `--reader-model` to switch
 reader without editing config, `--conversations-limit` / `--questions-limit` for
 smoke runs, `--config` to point at a different TOML.
 
-A run writes everything to `results/<run-tag>/`: `spaces.json` (the space
-manifest, reused on re-run), `retrieval.jsonl` (the assembled context per
-question), `answers-<model>.jsonl` and `judgements-<model>.jsonl`. Stages are
-resumable because each reads the previous stage's file.
+A run writes everything to `results/<run-tag>/`: `retrieval.jsonl` (the
+assembled context per question), `answers-<model>.jsonl` and
+`judgements-<model>.jsonl`. Stages are resumable because each reads the previous
+stage's file.
+
+The space manifest is keyed separately, to `results/<ingest-tag>/spaces.json`,
+because which spaces exist is a property of what was ingested rather than of how
+it is retrieved. `--ingest-tag` points a new retrieval run at an existing
+ingest, so comparing retrieval configurations costs a retrieval pass rather than
+re-uploading thousands of turns.
+
+Sweeping `final_k` and `neighbor_turns` and then re-running the winner over
+everything:
+
+```bash
+gmbench sweep --sample 240 --final-k 15,20,25,30 --neighbor-turns 2,3,4
+gmbench --run-tag try-k30 --ingest-tag <your-ingest-tag> retrieve
+```
 
 ## Configuration
 

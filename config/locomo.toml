@@ -39,12 +39,18 @@ chunk_overlap = 150
 separators = ["\n\n", "\n", ". ", " ", ""]
 
 [retrieval]
-# Dense depth then rerank depth, matching the paper's 128 -> 15 two-stage shape.
+# Dense depth then rerank depth. The paper's shape is 128 -> 15; a sweep over
+# (final_k, neighbor_turns) picked 30 -> ±2 as the best coverage available at
+# the paper's own evidence budget (~4.9k tokens against its ~4.8k LoCoMo mean).
+# Its own ablation finds final_k flat from 15 to 60, so this is not a thumb on
+# the scale -- it is spending the same budget on more selections rather than on
+# wider expansion around fewer.
 dense_candidates = 128
-final_k = 15
-# Turns kept either side of each selected turn. The paper's expanded evidence
-# averages ~4.8k tokens on LoCoMo; raise this if coverage is short.
+final_k = 30
+# Turns kept either side of each selected turn.
 neighbor_turns = 2
+# Sweeping 400 against 800 moved coverage by 0.00 points, so HNSW recall is not
+# a binding constraint here and the cheaper setting stands.
 ef_search = 400
 iterative_scan = "ITERATIVE_SCAN_RELAXED_ORDER"
 concurrency = 8
