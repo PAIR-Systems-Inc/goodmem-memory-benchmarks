@@ -377,36 +377,40 @@ def cmd_mab(args: argparse.Namespace, console: Console) -> int:
     table.add_column("Source", style="bold")
     table.add_column("N", justify="right")
     table.add_column("Accuracy", justify="right")
-    table.add_column("Single gold fact", justify="right")
-    table.add_column("...and retrieved", justify="right")
+    attributable = args.capability == "conflict_resolution"
+    if attributable:
+        table.add_column("Single gold fact", justify="right")
+        table.add_column("...and retrieved", justify="right")
     table.add_column("Errors", justify="right")
     for source, bucket in sorted(document["by_source"].items()):
-        rate = bucket["gold_retrieval_rate"]
-        table.add_row(
-            source,
-            str(bucket["questions"]),
-            f"{bucket['accuracy']:.2f}",
-            f"{bucket['gold_identifiable_rate']:.0f}%",
-            f"{rate:.0f}%" if rate is not None else "n/a",
-            str(bucket["errors"]) if bucket["errors"] else "-",
-        )
-    table.add_row(
-        "overall",
-        str(document["questions"]),
-        f"{document['accuracy']:.2f}",
-        "-",
-        "-",
-        str(document["errors"]) if document["errors"] else "-",
-        style="bold cyan",
-    )
+        cells = [source, str(bucket["questions"]), f"{bucket['accuracy']:.2f}"]
+        if attributable:
+            rate = bucket["gold_retrieval_rate"]
+            cells += [
+                f"{bucket['gold_identifiable_rate']:.0f}%",
+                f"{rate:.0f}%" if rate is not None else "n/a",
+            ]
+        cells.append(str(bucket["errors"]) if bucket["errors"] else "-")
+        table.add_row(*cells)
+    overall = ["overall (macro)", str(document["questions"]), f"{document['accuracy']:.2f}"]
+    if attributable:
+        overall += ["-", "-"]
+    overall.append(str(document["errors"]) if document["errors"] else "-")
+    table.add_row(*overall, style="bold cyan")
     console.print(table)
     console.print(
+        f"[dim]Overall is the mean of the source scores, per the paper's appendix "
+        f"D.5. Weighted by question it would be "
+        f"{document['accuracy_question_weighted']:.2f}.[/dim]"
+    )
+    if attributable:
+        console.print(
         "[dim]Single gold fact: the share of questions where one fact both names "
         "the question's entity and states the answer — near-total for single-hop, "
         "near-zero for multi-hop, where the answer-bearing fact names the bridging "
         "entity instead. ...and retrieved: of those, how often that fact reached "
         "the reader.[/dim]"
-    )
+        )
     console.print(f"[dim]Summary written to {path}[/dim]")
     return 1 if document["errors"] else 0
 

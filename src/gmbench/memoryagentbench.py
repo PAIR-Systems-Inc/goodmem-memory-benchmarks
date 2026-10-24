@@ -60,7 +60,7 @@ CAPABILITIES: dict[str, str] = {
 
 # How each source's context divides into things worth storing separately.
 UNIT_DOCUMENT = "document"      # Document N: blocks
-UNIT_SESSION = "session"        # a dated chat session
+UNIT_SESSION = "session"        # windows within a dated chat session
 UNIT_DEMONSTRATION = "demo"     # one labelled example
 UNIT_FACT = "fact"              # one serially numbered fact
 UNIT_PASSAGE = "passage"        # a slice of continuous prose
@@ -200,8 +200,25 @@ def _split(context: str, kind: str, passage_chars: int) -> Iterator[Unit]:
         return
 
     if kind == UNIT_SESSION:
-        for ordinal, part in enumerate(_split_sessions(context)):
-            yield Unit(f"session-{ordinal}", part, ordinal)
+        # A whole session is far too coarse a unit: they average about 14,000
+        # characters here, so one embedding has to stand for dozens of unrelated
+        # turns and cannot discriminate between them. The paper uses token
+        # windows for every MemoryAgentBench source except fact consolidation,
+        # and measured against this benchmark the session-level choice cost 40
+        # points on this source alone.
+        #
+        # Each window keeps the session's timestamp line, because these
+        # questions are date-sensitive and a window cut from the middle of a
+        # session would otherwise lose the only temporal anchor it has.
+        ordinal = 0
+        for session in _split_sessions(context):
+            lines = session.split("\n")
+            stamp = lines[0] if lines and lines[0].startswith("Chat Time:") else ""
+            body = "\n".join(lines[1:]) if stamp else session
+            for window in _pack_prose(body, passage_chars):
+                text = f"{stamp}\n{window}" if stamp else window
+                yield Unit(f"session-{ordinal}", text, ordinal)
+                ordinal += 1
         return
 
     # Prose: split on paragraph boundaries, packing up to the target size, so a

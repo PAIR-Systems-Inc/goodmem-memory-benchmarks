@@ -238,72 +238,94 @@ plausible number is not, so the harness is built to make the second impossible.
 | Benchmark | Questions | Status |
 |---|---:|---|
 | **LoCoMo** | 1,540 | Fully scored, two configurations, both readers |
-| **MemoryAgentBench** | 2,071 selected | Conflict Resolution scored; the other three groups ship as a verified adapter |
+| **MemoryAgentBench** | 2,071 selected | Conflict Resolution and Accurate Retrieval scored (1,200 questions); the other two groups ship as a verified adapter |
 | **BEAM-1M** | — | Fully measured: 1,710 messages, 1.43 h, flat per-message cost |
 | LongMemEval-S | 500 | Data acquired and verified, adapter not written |
 | PersonaMem-v2 | 5,000 | Data acquired and verified, adapter not written |
 
-### MemoryAgentBench: Conflict Resolution
+### MemoryAgentBench
 
-Reader `gpt-4o-mini`, 128 dense candidates to top-15, facts stored one per
-memory with their serial numbers intact.
+Two of four capability groups are scored, covering 1,200 of the 2,071 published
+questions. Reader `gpt-4o-mini`, 128 dense candidates to top-15. Capability
+scores are the mean of their source scores, per the paper's appendix D.5 — not
+weighted by question, which would let EventQA's 500 questions outweigh RULER's
+100 fivefold.
+
+| Capability | GoodMem | RAW-RAG | Stability across identical runs |
+|---|---:|---:|---|
+| Conflict Resolution | **51.50** | 46.00 | 51.50 in every run |
+| Accurate Retrieval | **54.10** | 67.85 | 54.08 – 58.48 over four runs |
+
+#### Conflict Resolution — where precedence lives in a serial number
 
 | Source | N | Accuracy | Questions with one gold fact | ...and GoodMem retrieved it |
 |---|---:|---:|---:|---:|
-| `factconsolidation_sh` | 100 | 93.00 | 92% | **100%** |
-| `factconsolidation_mh` | 100 | 10.00 | 1% | 100% |
-| **Overall** | **200** | **51.50** | — | — |
+| `factconsolidation_sh` | 100 | 94.00 | 92% | **100%** |
+| `factconsolidation_mh` | 100 | 9.00 | 1% | 100% |
 
-The paper reports RAW-RAG at **46.00** on this capability, the best score in its
-table. It does not break the two sources out, and the split is where the
-interesting part is.
+**On single-hop, retrieval is perfect.** For the 92%
+of questions where one fact both names the entity and states the answer, GoodMem
+put that exact fact in front of the reader **100% of
+the time** — from 2,310 facts of which hundreds are near-identical in form
+(`"... is associated with the sport of ..."`). The remaining
+6 points are the reader preferring an older conflicting
+fact, not a retrieval miss.
 
-**On single-hop, retrieval is perfect.** For the 92% of
-questions where one fact both names the entity and states the answer, GoodMem put
-that exact fact in front of the reader **100% of the
-time** — out of 2,310 facts of which hundreds are near-identical in form
-(`"... is associated with the sport of ..."`). The 7-point
-shortfall to a perfect score is therefore not a retrieval failure: it is the
-reader occasionally preferring an older conflicting fact over the newest one.
-
-**On multi-hop, one query cannot win.** Only 1% of
-those questions have a single fact naming the question's entity *and* stating the
-answer, because the answer-bearing fact names the bridging entity instead. Asked
-*"Where did the religion associated with the Bagratuni Dynasty come into
+**On multi-hop, one query cannot win.** Only 1%
+of those questions have a single fact naming the question's entity *and* stating
+the answer, because the answer-bearing fact names the bridging entity instead.
+Asked *"Where did the religion associated with the Bagratuni Dynasty come into
 existence?"*, the gold fact is `475. Christianity was founded in the city of
-Taipei.` — zero words shared with the question. Reaching it requires resolving
-Bagratuni Dynasty to Christianity first. That is out of reach for any fixed
-single-shot retriever, which is exactly what the paper's baseline is: it
-*"isolates evidence access from query-time search control."* Adding a second hop
-would score better and stop being comparable, so it is not done here.
+Taipei.` — zero words shared with the question. Reaching it means resolving
+Bagratuni Dynasty to Christianity first, which is out of reach for a fixed
+single-shot retriever. That is precisely what the paper's baseline is: it
+*"isolates evidence access from query-time search control."* Adding a hop would
+score better and stop being comparable, so it is not done.
 
-Note also that the benchmark is deliberately counterfactual. Salem-Keizer
-Volcanoes is really a baseball team; the fact pool says baseball at serial 1257
-and basketball at 1722, and the gold answer is basketball. A model answering from
-world knowledge scores zero by construction.
+The benchmark is also deliberately counterfactual. Salem-Keizer Volcanoes is
+really a baseball team; the pool says baseball at serial 1257 and basketball at
+1722, and the gold answer is basketball. Answering from world knowledge scores
+zero by construction.
 
-### MemoryAgentBench
+#### Accurate Retrieval — and a warning about its own metric
 
-The published 2,071 questions are a **selection**, not what ships. The released
-file carries 3,671 across 22 `source` labels, because EventQA ships at three
-context lengths and FactConsolidation at four; taking one variant per source
-gives 2,071. Counting labels naively over-reports by 77%. `gmbench mab-inspect`
-prints the selection with its capability split, so a run states its own question
-set:
+| Source | N | Accuracy | Range over four identical runs |
+|---|---:|---:|---|
+| `ruler_qa1` | 100 | 88.00 | 88.00 – 88.00 |
+| `ruler_qa2` | 100 | 69.00 | 68.00 – 69.00 |
+| `eventqa` | 500 | 48.40 | 48.00 – 59.60 |
+| `longmemeval` | 300 | 11.00 | 11.00 – 19.33 |
 
-```
-accurate_retrieval        1000   (eventqa 500, longmemeval 300, ruler_qa1 100, ruler_qa2 100)
-test_time_learning         700   (5 × ICL 100, recsys_redial 200)
-long_range_understanding   171   (detective_qa 71, infbench_sum 100)
-conflict_resolution        200   (factconsolidation sh/mh 100 each)
-```
+**Two of these four sources are not reliably measurable in a single run**, and
+the split tracks the metric rather than the system. RULER's golds are short
+factual entities scored by boundary match, and it returns the same number every
+time. EventQA asks the reader to freely generate the next narrative event and
+then scores a ~45-character gold by containment, so a small shift in retrieved
+context flips the match — an 11.6-point spread across runs that differ in
+nothing. LongMemEval's haystack is 111 distractor-heavy sessions where marginal
+reranker movement changes which one surfaces.
 
-Ingestion units differ per source and are not interchangeable: a serially
-numbered fact, a dated chat session, a labelled demonstration and a slice of a
-novel each split differently. FactConsolidation keeps its serial number as
-metadata because precedence lives there — a larger serial is newer — and
-demonstrations are never split by size, because an example must stay with its
-label.
+The published RAW-RAG figure of 67.85 is likewise a single run, so the gap to it
+should be read with that in mind. The honest reading of our result: GoodMem is
+strong on RULER, weak on LongMemEval-within-MemoryAgentBench, and EventQA is a
+coin whose variance exceeds the differences anyone would want to draw from it.
+
+**LongMemEval at 11.00 is a genuine weakness, not a measurement artifact.** Note
+it is a different setting from the standalone benchmark, where RAW-RAG reaches
+87.53: there each example has its own isolated store and a question date to
+filter on, while here 60 questions share one pool of 111 sessions including other
+questions' distractors. Our number is low even allowing for that, and worth
+chasing rather than explaining away.
+
+#### Not scored
+
+Test-Time Learning (700 questions) and Long-Range Understanding (171) ship as a
+verified adapter. The obstacle is scoring, not ingest — both groups load and
+split correctly, and `gmbench mab-inspect` shows them in the selection. TTL needs
+exact numeric-label matching for the five in-context sources plus Recall@5 over
+integer movie ids for ReDial; LRU needs an LLM judge with per-question keypoints
+for book summarization. Neither is written, and partial scores for them are not
+reported.
 
 ### BEAM-1M
 

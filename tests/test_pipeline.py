@@ -758,6 +758,17 @@ def test_substring_scoring_accepts_any_gold_paraphrase() -> None:
     )
 
 
+def test_scoring_is_anchored_at_word_boundaries() -> None:
+    """Bare containment scores wrong answers on these sources' short golds."""
+    from gmbench.mab_run import score
+
+    assert not score("yesterday I worked a lot", ["yes"]), "yes inside yesterday"
+    assert score("the answer is yes", ["yes"])
+    assert not score("about 150 hours a week", ["50"]), "50 inside 150"
+    assert score("about 50 hours a week", ["50"])
+    assert score("France.", ["France"]), "trailing punctuation must still match"
+
+
 def test_substring_scoring_rejects_a_miss_and_an_empty_prediction() -> None:
     from gmbench.mab_run import score
 
@@ -876,3 +887,78 @@ def test_summary_reports_no_retrieval_rate_when_nothing_is_attributable() -> Non
     bucket = summarize(outcomes)["by_source"]["factconsolidation_mh"]
     assert bucket["gold_retrieval_rate"] is None, "a rate over zero questions is not zero"
     assert bucket["gold_identifiable_rate"] == pytest.approx(0.0)
+
+
+def test_capability_score_is_a_macro_average_over_sources() -> None:
+    """The paper averages source scores, not questions (appendix D.5).
+
+    The two coincide only when sources contribute equally many questions. For
+    accurate retrieval they do not: EventQA's 500 questions would outweigh
+    RULER's 100 fivefold and change the published figure.
+    """
+    from gmbench.mab_run import Outcome, summarize
+
+    big = [
+        Outcome(f"b{i}", "eventqa", "accurate_retrieval", "?", ["x"], "x", i < 1, [], None)
+        for i in range(10)
+    ]
+    small = [
+        Outcome("s0", "ruler_qa1", "accurate_retrieval", "?", ["x"], "x", True, [], None)
+    ]
+    document = summarize(big + small)
+    # eventqa 10%, ruler 100% -> macro 55.0; question-weighted would be ~18.2.
+    assert document["accuracy"] == pytest.approx(55.0)
+    assert document["accuracy_question_weighted"] == pytest.approx(100 * 2 / 11)
+
+
+def test_session_units_are_windowed_and_keep_their_timestamp() -> None:
+    """A whole session is too coarse to embed, and a window needs its date.
+
+    Sessions here average ~14,000 characters, so one embedding standing for the
+    whole thing cannot discriminate between dozens of unrelated turns. These
+    questions are also date-sensitive, so a window cut from mid-session must
+    carry the timestamp forward or it loses its only temporal anchor.
+    """
+    from gmbench.memoryagentbench import UNIT_SESSION, Block
+
+    long_turn = "user: " + ("a lorem ipsum sentence about travel plans. " * 80)
+    context = repr(
+        [
+            "Chat Time: 2022/11/17 (Thu) 12:04",
+            [{"role": "user", "content": long_turn}, {"role": "assistant", "content": long_turn}],
+        ]
+    )
+    block = Block(
+        block_id="b",
+        label="longmemeval_s*",
+        source="longmemeval",
+        capability="accurate_retrieval",
+        unit_kind=UNIT_SESSION,
+        context=context,
+        tasks=(),
+    )
+    units = block.units(passage_chars=1500)
+    assert len(units) > 1, "a long session must split into several windows"
+    assert all(u.text.startswith("Chat Time: 2022/11/17") for u in units)
+    assert max(len(u.text) for u in units) < 6000
+
+
+@needs_mab
+def test_dataset_question_ids_collide_across_blocks() -> None:
+    """A guard on the assumption that made the resume key wrong.
+
+    The released qa_pair_ids repeat: EventQA's five blocks each number their
+    questions no0..no99 while asking 500 distinct questions. Anything keyed on
+    the dataset id alone silently loses four fifths of them.
+    """
+    from gmbench import memoryagentbench as mab
+
+    blocks = [b for b in mab.load(MAB_DIR) if b.source == "eventqa"]
+    ids = [t.qid for b in blocks for t in b.tasks]
+    questions = [t.question for b in blocks for t in b.tasks]
+    assert len(questions) == 500
+    assert len(set(questions)) == 500, "the questions themselves are distinct"
+    assert len(set(ids)) == 100, "but their dataset ids are not"
+    # Qualifying by block is what restores uniqueness.
+    qualified = [f"{b.block_id}:{t.qid}" for b in blocks for t in b.tasks]
+    assert len(set(qualified)) == 500

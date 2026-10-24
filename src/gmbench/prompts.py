@@ -146,8 +146,15 @@ MAB_LONGMEMEVAL_QUERY = """The history chats are between you and a user. Based o
 
 Answer:"""
 
+MAB_EVENTQA_QUERY = """Based on the context you memorized, complete the task below:
+
+{question}
+
+The event that happens next is:"""
+
 # Which task template each source uses.
 MAB_QUERIES: dict[str, str] = {
+    "eventqa": MAB_EVENTQA_QUERY,
     "factconsolidation_sh": MAB_FACT_CONSOLIDATION_QUERY,
     "factconsolidation_mh": MAB_FACT_CONSOLIDATION_QUERY,
     "ruler_qa1": MAB_RULER_QA_QUERY,

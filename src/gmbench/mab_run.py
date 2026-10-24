@@ -68,18 +68,27 @@ def outcomes_path(config: RunConfig, capability: str) -> Path:
 def score(prediction: str, answers: list[str]) -> bool:
     """Scores a prediction against the acceptable gold strings.
 
-    MemoryAgentBench grades these by substring containment, and ``answers`` is a
-    set of acceptable paraphrases rather than one string, so any of them
-    appearing in the prediction counts. Matching is case-insensitive and
-    whitespace-normalised; nothing else is normalised, because stripping
-    punctuation or stemming would quietly loosen the metric.
+    MemoryAgentBench grades by containment, and ``answers`` is a set of
+    acceptable paraphrases rather than one string, so any of them counts.
+    Matching is case-insensitive and whitespace-normalised, and anchored at word
+    boundaries -- bare substring containment is wrong on the short answers these
+    sources use, where ``yes`` matches "yesterday" and ``50`` matches "150",
+    turning a wrong answer into a scored point. Nothing else is normalised;
+    stripping punctuation or stemming would loosen the metric silently.
     """
     if not prediction.strip():
         return False
     haystack = " ".join(prediction.lower().split())
     for answer in answers:
         needle = " ".join(str(answer).lower().split())
-        if needle and needle in haystack:
+        if not needle:
+            continue
+        pattern = re.escape(needle)
+        # Only anchor on a side that begins or ends with a word character;
+        # a needle like "(2001)" has no boundary to anchor against.
+        left = r"\b" if needle[0].isalnum() else ""
+        right = r"\b" if needle[-1].isalnum() else ""
+        if re.search(f"{left}{pattern}{right}", haystack):
             return True
     return False
 
@@ -329,7 +338,12 @@ def _answer_one(
 
     answers = list(task.answers)
     return Outcome(
-        qid=task.qid,
+        # The dataset's qa_pair_ids are not unique across blocks: all five
+        # EventQA blocks number their questions no0..no99 while asking 500
+        # different questions. Keyed on that alone, a resumed run silently skips
+        # 400 of them, and any per-question comparison collapses to a fifth of
+        # the set. The block id makes it unique.
+        qid=f"{block.block_id}:{task.qid}",
         source=task.source,
         capability=task.capability,
         question=task.question,
@@ -442,10 +456,20 @@ def summarize(outcomes: list[Outcome]) -> dict[str, Any]:
         )
         bucket["gold_identifiable_rate"] = 100.0 * identifiable / n
 
+    # The paper aggregates these capabilities as the mean of their constituent
+    # source scores, not as a mean over questions: "Accurate Retrieval,
+    # Long-Range Understanding, and Conflict Resolution average their
+    # constituent source scores" (appendix D.5). The two coincide only when
+    # every source contributes equally many questions, which is true of
+    # conflict resolution and false of accurate retrieval -- where EventQA's 500
+    # questions would otherwise outweigh RULER's 100 fivefold.
+    source_scores = [bucket["accuracy"] for bucket in by_source.values()]
     total = len(outcomes) or 1
     return {
         "questions": len(outcomes),
-        "accuracy": 100.0 * sum(o.correct for o in outcomes) / total,
+        "accuracy": sum(source_scores) / len(source_scores) if source_scores else 0.0,
+        "accuracy_question_weighted": 100.0 * sum(o.correct for o in outcomes) / total,
+        "aggregation": "macro-average over source scores, per the paper's appendix D.5",
         "errors": sum(1 for o in outcomes if o.error),
         "by_source": by_source,
     }

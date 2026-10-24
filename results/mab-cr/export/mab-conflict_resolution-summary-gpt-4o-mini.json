@@ -1,0 +1,39 @@
+{
+  "benchmark": "memoryagentbench",
+  "capability": "conflict_resolution",
+  "run_tag": "mab-cr",
+  "reader_model": "gpt-4o-mini",
+  "retrieval": {
+    "dense_candidates": 128,
+    "final_k": 15
+  },
+  "scoring": "substring containment against the acceptable gold strings",
+  "scope_note": "Only this capability group was scored. The other three ship as a verified adapter; their contexts run to millions of characters per block and were out of budget here.",
+  "questions": 200,
+  "accuracy": 51.5,
+  "accuracy_question_weighted": 51.5,
+  "aggregation": "macro-average over source scores, per the paper's appendix D.5",
+  "errors": 0,
+  "by_source": {
+    "factconsolidation_mh": {
+      "questions": 100,
+      "correct": 9,
+      "gold_retrieved": 1,
+      "gold_identifiable": 1,
+      "errors": 0,
+      "accuracy": 9.0,
+      "gold_retrieval_rate": 100.0,
+      "gold_identifiable_rate": 1.0
+    },
+    "factconsolidation_sh": {
+      "questions": 100,
+      "correct": 94,
+      "gold_retrieved": 92,
+      "gold_identifiable": 92,
+      "errors": 0,
+      "accuracy": 94.0,
+      "gold_retrieval_rate": 100.0,
+      "gold_identifiable_rate": 92.0
+    }
+  }
+}
