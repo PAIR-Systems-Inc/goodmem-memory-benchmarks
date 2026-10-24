@@ -152,12 +152,79 @@ MAB_EVENTQA_QUERY = """Based on the context you memorized, complete the task bel
 
 The event that happens next is:"""
 
-# Which task template each source uses.
+
+
+
+MAB_ICL_QUERY = """Use the provided mapping from the context to numerical label to assign a numerical label to the context. Only output "label: {{label}}" and nothing else.
+
+Question:{question}
+
+label:"""
+
+MAB_REDIAL_QUERY = """Pretend you are a movie recommender system. You need to recommend movies based on the dialogues you have memorized. Now I will give you a new conversation between a user and you (a recommender system). Based on the conversation, you reply me with 20 recommendations without extra sentences.
+
+For Example:
+
+[Conversation]
+
+The recommendations are:
+1.movie1
+2.movie2
+...
+
+Here is the conversation: {question}
+
+The recommendations are:"""
+
+MAB_DETECTIVE_QA_QUERY = """Based on the context you memorized, answer the question below. You are required to answer the question based on the strict output format.
+
+{question}"""
+
+MAB_INFBENCH_SUM_QUERY = """You are given a book above and you are tasked to summarize it.
+
+{question}
+
+Now summarize the book."""
+
+# InfBench summaries cannot be graded by string containment: the task is a
+# 1,000-word plot summary and the benchmark ships per-question keypoints as its
+# rubric. This asks a judge how many of those keypoints the summary actually
+# covers, which is what "summary scoring" means for this source.
+MAB_SUMMARY_JUDGE_SYSTEM = (
+    "You are an expert grader assessing whether a book summary covers the "
+    "required plot points. Judge only coverage of the listed key points, not "
+    "style, length or writing quality."
+)
+
+MAB_SUMMARY_JUDGE_USER = """Below is a summary of a book, followed by the key plot points it was required to cover.
+
+For each key point, decide whether the summary conveys it. A point counts as covered if the summary states the same substance, even in different words. It does not count if the summary omits it, contradicts it, or is too vague to tell.
+
+SUMMARY:
+{summary}
+
+KEY POINTS:
+{keypoints}
+
+Return only a JSON object with the key "covered", whose value is the number of key points the summary covers, and the key "total", whose value is the number of key points listed. No other text."""
+
+
+# Which task template each source uses. This must cover every source in
+# memoryagentbench.GRADERS; a missing entry is caught before a run starts
+# rather than after a few hundred failed questions.
 MAB_QUERIES: dict[str, str] = {
     "eventqa": MAB_EVENTQA_QUERY,
-    "factconsolidation_sh": MAB_FACT_CONSOLIDATION_QUERY,
-    "factconsolidation_mh": MAB_FACT_CONSOLIDATION_QUERY,
+    "longmemeval": MAB_LONGMEMEVAL_QUERY,
     "ruler_qa1": MAB_RULER_QA_QUERY,
     "ruler_qa2": MAB_RULER_QA_QUERY,
-    "longmemeval": MAB_LONGMEMEVAL_QUERY,
+    "factconsolidation_sh": MAB_FACT_CONSOLIDATION_QUERY,
+    "factconsolidation_mh": MAB_FACT_CONSOLIDATION_QUERY,
+    "icl_banking77": MAB_ICL_QUERY,
+    "icl_clinic150": MAB_ICL_QUERY,
+    "icl_nlu": MAB_ICL_QUERY,
+    "icl_trec_coarse": MAB_ICL_QUERY,
+    "icl_trec_fine": MAB_ICL_QUERY,
+    "recsys_redial": MAB_REDIAL_QUERY,
+    "detective_qa": MAB_DETECTIVE_QA_QUERY,
+    "infbench_sum": MAB_INFBENCH_SUM_QUERY,
 }

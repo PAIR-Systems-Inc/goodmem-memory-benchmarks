@@ -847,23 +847,51 @@ def test_knowledge_pool_is_rendered_in_serial_order() -> None:
     assert rendered.index("223. middle.") < rendered.index("310. newest.")
 
 
+def _outcome(
+    qid: str,
+    *,
+    source: str = "factconsolidation_sh",
+    capability: str = "conflict_resolution",
+    correct: bool = False,
+    retrieved: list[int] | None = None,
+    gold: int | None = None,
+    partial: float | None = None,
+):
+    """Builds an Outcome, keeping `partial` consistent with `correct`.
+
+    Aggregation reads `partial`, because summarisation is graded by fractional
+    keypoint coverage. Every other source stores 1.0 or 0.0 there, so a helper
+    keeps the two from drifting apart in tests.
+    """
+    from gmbench.mab_run import Outcome
+
+    return Outcome(
+        qid=qid,
+        source=source,
+        capability=capability,
+        question="?",
+        answers=["x"],
+        prediction="x",
+        correct=correct,
+        retrieved_serials=retrieved or [],
+        gold_serial=gold,
+        partial=float(correct) if partial is None else partial,
+    )
+
+
 def test_summary_separates_a_reading_failure_from_a_retrieval_one() -> None:
     """Accuracy alone cannot tell those apart, so attribution is tracked."""
     from gmbench.mab_run import Outcome, summarize
 
     outcomes = [
         # Gold fact retrieved and answered: a clean pass.
-        Outcome("q1", "factconsolidation_sh", "conflict_resolution", "?", ["a"],
-                "a", True, [1, 310], 310),
+        _outcome("q1", correct=True, retrieved=[1, 310], gold=310),
         # Gold fact retrieved but the reader chose an older one: a reading failure.
-        Outcome("q2", "factconsolidation_sh", "conflict_resolution", "?", ["b"],
-                "wrong", False, [2, 400], 400),
+        _outcome("q2", correct=False, retrieved=[2, 400], gold=400),
         # Gold fact never retrieved: a retrieval failure.
-        Outcome("q3", "factconsolidation_sh", "conflict_resolution", "?", ["c"],
-                "wrong", False, [5, 6], 900),
+        _outcome("q3", correct=False, retrieved=[5, 6], gold=900),
         # No single fact names the entity and states the answer: not attributable.
-        Outcome("q4", "factconsolidation_sh", "conflict_resolution", "?", ["d"],
-                "wrong", False, [7], None),
+        _outcome("q4", correct=False, retrieved=[7], gold=None),
     ]
     document = summarize(outcomes)
     bucket = document["by_source"]["factconsolidation_sh"]
@@ -881,8 +909,7 @@ def test_summary_reports_no_retrieval_rate_when_nothing_is_attributable() -> Non
     from gmbench.mab_run import Outcome, summarize
 
     outcomes = [
-        Outcome("q1", "factconsolidation_mh", "conflict_resolution", "?", ["a"],
-                "wrong", False, [1], None),
+        _outcome("q1", source="factconsolidation_mh", correct=False, retrieved=[1], gold=None),
     ]
     bucket = summarize(outcomes)["by_source"]["factconsolidation_mh"]
     assert bucket["gold_retrieval_rate"] is None, "a rate over zero questions is not zero"
@@ -899,11 +926,11 @@ def test_capability_score_is_a_macro_average_over_sources() -> None:
     from gmbench.mab_run import Outcome, summarize
 
     big = [
-        Outcome(f"b{i}", "eventqa", "accurate_retrieval", "?", ["x"], "x", i < 1, [], None)
+        _outcome(f"b{i}", source="eventqa", capability="accurate_retrieval", correct=i < 1)
         for i in range(10)
     ]
     small = [
-        Outcome("s0", "ruler_qa1", "accurate_retrieval", "?", ["x"], "x", True, [], None)
+        _outcome("s0", source="ruler_qa1", capability="accurate_retrieval", correct=True)
     ]
     document = summarize(big + small)
     # eventqa 10%, ruler 100% -> macro 55.0; question-weighted would be ~18.2.
@@ -962,3 +989,175 @@ def test_dataset_question_ids_collide_across_blocks() -> None:
     # Qualifying by block is what restores uniqueness.
     qualified = [f"{b.block_id}:{t.qid}" for b in blocks for t in b.tasks]
     assert len(set(qualified)) == 500
+
+
+# -- per-source graders --------------------------------------------------
+
+
+def test_label_grading_is_exact_not_containment() -> None:
+    """Bare integer labels: 7 must not score against a gold of 71."""
+    from gmbench.mab_run import score_label
+
+    assert score_label("label: 28", ["28"])
+    assert score_label("28", ["28"]), "a bare number still parses"
+    assert not score_label("label: 7", ["71"]), "7 inside 71"
+    assert not score_label("label: 71", ["7"]), "and the reverse"
+    assert not score_label("I am not sure", ["28"])
+
+
+def test_choice_grading_ignores_the_option_letter() -> None:
+    """The released DetectiveQA letters do not match their own option text."""
+    from gmbench.mab_run import score_choice
+
+    assert score_choice('{"answer": "The Brandt couple"}', ["C. The Brandt couple"])
+    assert score_choice('{"answer": "B. The Brandt couple"}', ["C. The Brandt couple"]), (
+        "a disagreeing letter must not fail a correct answer"
+    )
+    assert not score_choice('{"answer": "Suicide"}', ["C. The Brandt couple"])
+
+
+def test_recall_grading_resolves_movie_ids_to_titles() -> None:
+    """ReDial golds are integer DBpedia ids, meaningless against film names."""
+    from gmbench.mab_run import movie_titles, score_recall
+
+    titles = movie_titles(
+        {
+            "<http://dbpedia.org/resource/The_Big_Lebowski>": 7008,
+            "<http://dbpedia.org/resource/Fargo_(film)>": 42,
+        }
+    )
+    assert titles["7008"] == "The Big Lebowski"
+    top5 = "1. Fargo\n2. The Big Lebowski\n3. Heat\n4. Alien\n5. Up"
+    assert score_recall(top5, ["7008"], titles, at=5)
+    assert score_recall(top5, ["42"], titles, at=5), "a disambiguator is stripped"
+    assert not score_recall(top5, ["7008"], titles, at=1), "Recall@1 is stricter"
+    assert not score_recall(top5, ["999"], titles, at=5), "an unknown id cannot match"
+
+
+def test_recall_grading_needs_the_entity_map() -> None:
+    from gmbench.mab_run import score_recall
+
+    assert not score_recall("1. The Big Lebowski", ["7008"], {}, at=5)
+
+
+def test_every_source_has_a_template_and_a_grader() -> None:
+    """A missing entry fails every question of that source identically.
+
+    Discovered at run time it costs a full ingest and hundreds of requests to
+    learn something knowable before the run starts, so it is asserted here and
+    preflighted in run_capability.
+    """
+    from gmbench.memoryagentbench import CAPABILITIES, GRADERS
+    from gmbench.prompts import MAB_QUERIES
+
+    assert set(GRADERS) == set(CAPABILITIES), "every source needs a grader"
+    assert set(MAB_QUERIES) == set(CAPABILITIES), "every source needs a template"
+
+
+def test_test_time_learning_uses_the_papers_nested_formula() -> None:
+    """TTL weights ReDial equally against the mean of five in-context sources.
+
+    A flat mean over its six sources gives the in-context sources five sixths
+    of the weight instead of a half. On our measured run that reads 63.83 where
+    the specified formula reads 47.50 — against a published 47.68, so the
+    difference is the whole comparison.
+    """
+    from gmbench.mab_run import capability_score
+
+    ttl = {
+        "icl_banking77": {"accuracy": 86.0},
+        "icl_clinic150": {"accuracy": 86.0},
+        "icl_nlu": {"accuracy": 84.0},
+        "icl_trec_coarse": {"accuracy": 61.0},
+        "icl_trec_fine": {"accuracy": 43.0},
+        "recsys_redial": {"accuracy": 23.0},
+    }
+    # (23 + mean(86,86,84,61,43)) / 2 = (23 + 72) / 2
+    assert capability_score(ttl) == pytest.approx(47.5)
+    flat = sum(b["accuracy"] for b in ttl.values()) / len(ttl)
+    assert flat == pytest.approx(63.833, abs=0.01), "the flat mean it must not be"
+
+
+def test_other_capabilities_average_their_sources() -> None:
+    from gmbench.mab_run import capability_score
+
+    ar = {
+        "eventqa": {"accuracy": 48.4},
+        "longmemeval": {"accuracy": 11.0},
+        "ruler_qa1": {"accuracy": 88.0},
+        "ruler_qa2": {"accuracy": 69.0},
+    }
+    assert capability_score(ar) == pytest.approx(54.1)
+    assert capability_score({}) == 0.0
+
+
+@needs_mab
+def test_infbench_question_gets_all_its_keypoints() -> None:
+    """InfBench ships one question per block with 25 keypoints for it.
+
+    Taking the i-th element, as DetectiveQA needs, hands InfBench a single
+    keypoint out of 25 and grades a book summary against a twenty-fifth of its
+    rubric — which scored 2.00 before this was fixed.
+    """
+    from gmbench import memoryagentbench as mab
+
+    blocks = mab.load(MAB_DIR)
+    inf = next(b for b in blocks if b.source == "infbench_sum")
+    assert len(inf.tasks) == 1, "one summarization question per book"
+    assert len(inf.tasks[0].keypoints) > 10, "and the whole rubric belongs to it"
+
+    detective = next(b for b in blocks if b.source == "detective_qa")
+    assert len(detective.tasks) > 1
+    assert all(len(t.keypoints) <= 1 for t in detective.tasks), "one each here"
+
+
+@needs_mab
+def test_resume_key_matches_the_written_key() -> None:
+    """These two uses must agree, and once did not.
+
+    Outcomes were written with a block-qualified id while resume compared the
+    raw dataset id. Nothing ever matched, so a resumed run re-ran every question
+    and appended to the existing shard, doubling both the rows and the question
+    count the summary reported. Deriving both from one function is the fix.
+    """
+    from gmbench import memoryagentbench as mab
+    from gmbench.mab_run import outcome_id
+
+    block = next(b for b in mab.load(MAB_DIR) if b.source == "factconsolidation_sh")
+    task = block.tasks[0]
+    written = outcome_id(block, task)
+    assert written.startswith(block.block_id)
+    assert task.qid in written
+    assert outcome_id(block, task) == written
+
+    # And it must separate questions the dataset gives the same id.
+    eventqa = [b for b in mab.load(MAB_DIR) if b.source == "eventqa"]
+    ids = {outcome_id(b, t) for b in eventqa for t in b.tasks}
+    assert len(ids) == 500, "all five blocks' questions stay distinct"
+
+
+def test_summary_judge_failure_is_not_zero_coverage(monkeypatch) -> None:
+    """An outage and a summary covering nothing must not be the same number.
+
+    One is a broken measurement, the other is a result. Returning 0.0 for both
+    is how an outage gets published as a score.
+    """
+    from gmbench import mab_run
+
+    class _Broken:
+        def chat_completion(self, *a, **k):
+            raise RuntimeError("judge down")
+
+    class _Garbled:
+        def chat_completion(self, *a, **k):
+            class R:
+                text = "I could not comply."
+            return R()
+
+    cfg = type(
+        "C", (), {"models": type("M", (), {"judge_llm_id": "x", "judge_model": "m"})()}
+    )()
+    assert mab_run.score_summary(_Broken(), cfg, "a summary", ["point one"]) is None
+    assert mab_run.score_summary(_Garbled(), cfg, "a summary", ["point one"]) is None
+    # An empty summary genuinely covers nothing, and that is a zero.
+    assert mab_run.score_summary(_Broken(), cfg, "   ", ["point one"]) == 0.0

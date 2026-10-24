@@ -367,7 +367,12 @@ def cmd_mab(args: argparse.Namespace, console: Console) -> int:
 
     with _client(cfg) as client:
         outcomes = mab_run.run_capability(
-            client, cfg, blocks, args.capability, resume=not args.no_resume
+            client,
+            cfg,
+            blocks,
+            args.capability,
+            dataset_dir=directory,
+            resume=not args.no_resume,
         )
 
     document = mab_run.summarize(outcomes)

@@ -30,8 +30,14 @@ from tqdm import tqdm
 from . import jsonl
 from .client import GoodMemClient, GoodMemError
 from .config import RunConfig
-from .memoryagentbench import Block, Task, Unit
-from .prompts import MAB_QUERIES, MAB_READER_SYSTEM, MAB_READER_USER
+from .memoryagentbench import GRADERS, Block, Task, Unit
+from .prompts import (
+    MAB_QUERIES,
+    MAB_READER_SYSTEM,
+    MAB_READER_USER,
+    MAB_SUMMARY_JUDGE_SYSTEM,
+    MAB_SUMMARY_JUDGE_USER,
+)
 from .ratelimit import RateLimiter
 
 _SERIAL_PREFIX_RE = re.compile(r"^(\d+)\.\s*")
@@ -50,6 +56,10 @@ class Outcome:
     correct: bool
     retrieved_serials: list[int]
     gold_serial: int | None
+    # Summarisation is graded by keypoint coverage, which is fractional; every
+    # other source is binary and stores 0.0 or 1.0 here. Aggregation uses this
+    # rather than the boolean, so coverage is not rounded away.
+    partial: float = 0.0
     error: str | None = None
 
     def to_json(self) -> dict[str, Any]:
@@ -59,6 +69,22 @@ class Outcome:
     def from_json(cls, raw: dict[str, Any]) -> "Outcome":
         fields = {name for name in cls.__dataclass_fields__}
         return cls(**{k: v for k, v in raw.items() if k in fields})
+
+
+def outcome_id(block: Block, task: Task) -> str:
+    """Returns the identity of one question, for both writing and resuming.
+
+    The dataset's qa_pair_ids are not unique across blocks: all five EventQA
+    blocks number their questions no0..no99 while asking 500 different
+    questions, so the block has to qualify them.
+
+    This is one function because the two uses have to agree, and they did not.
+    Outcomes were written qualified while resume compared the raw dataset id, so
+    a resumed run matched nothing, re-ran every question and appended to the
+    existing shard -- doubling both the rows and the question total the summary
+    reported.
+    """
+    return f"{block.block_id}:{task.qid}"
 
 
 def outcomes_path(config: RunConfig, capability: str) -> Path:
@@ -281,6 +307,7 @@ def _answer_one(
     units: list[Unit],
     task: Task,
     llm_id: str,
+    titles: dict[str, str] | None = None,
 ) -> Outcome:
     """Retrieves, reads and scores one question."""
     by_serial = {unit.serial: unit for unit in units if unit.serial is not None}
@@ -330,26 +357,49 @@ def _answer_one(
             ],
             model=config.models.reader_model,
             temperature=0.0,
-            max_tokens=256,
+            # A book summary is asked for at 1,000 to 1,200 words; capping it at
+            # a short-answer budget would truncate it and grade the truncation.
+            max_tokens=4096 if GRADERS.get(block.source) == "summary" else 256,
         )
         prediction = completion.text
     except Exception as exc:  # noqa: BLE001 - recorded, surfaced in the report
         error = f"{type(exc).__name__}: {exc}"
 
     answers = list(task.answers)
+    grader = GRADERS.get(block.source, "contains")
+    partial = 0.0
+    if error:
+        correct = False
+    elif grader == "label":
+        correct = score_label(prediction, answers)
+    elif grader == "choice":
+        correct = score_choice(prediction, answers)
+    elif grader == "recall":
+        correct = score_recall(prediction, answers, titles or {})
+    elif grader == "summary":
+        coverage = score_summary(client, config, prediction, list(task.keypoints))
+        if coverage is None:
+            error = "summary judge unavailable or unparseable"
+            correct = False
+        else:
+            partial = coverage
+            # A summary is credited by coverage; the binary flag marks the
+            # majority covered, so the two numbers do not disagree in spirit.
+            correct = partial >= 0.5
+    else:
+        correct = score(prediction, answers)
+    if grader != "summary":
+        partial = 1.0 if correct else 0.0
+
     return Outcome(
-        # The dataset's qa_pair_ids are not unique across blocks: all five
-        # EventQA blocks number their questions no0..no99 while asking 500
-        # different questions. Keyed on that alone, a resumed run silently skips
-        # 400 of them, and any per-question comparison collapses to a fifth of
-        # the set. The block id makes it unique.
-        qid=f"{block.block_id}:{task.qid}",
+        qid=outcome_id(block, task),
         source=task.source,
         capability=task.capability,
         question=task.question,
         answers=answers,
         prediction=prediction,
-        correct=score(prediction, answers) if not error else False,
+        correct=correct,
+        partial=partial,
         retrieved_serials=[u.serial for u in retrieved if u.serial is not None],
         gold_serial=gold_serial_for(units, answers, task.question),
         error=error,
@@ -362,6 +412,7 @@ def run_capability(
     blocks: list[Block],
     capability: str,
     *,
+    dataset_dir: Path,
     resume: bool = True,
 ) -> list[Outcome]:
     """Ingests and scores every block in one capability group.
@@ -371,6 +422,7 @@ def run_capability(
       config: Active run configuration.
       blocks: All loaded blocks; only those in ``capability`` are used.
       capability: Which group to run.
+      dataset_dir: Dataset root, for the entity map ReDial scoring needs.
       resume: Keep outcomes already on disk and only do the remainder.
 
     Returns:
@@ -379,10 +431,35 @@ def run_capability(
     selected = [block for block in blocks if block.capability == capability]
     if not selected:
         raise GoodMemError(f"no blocks for capability {capability!r}")
+
+    # Preflight. A source without a reader template fails every one of its
+    # questions identically, which costs a full ingest and a few hundred
+    # requests to discover something knowable up front.
+    missing = sorted({b.source for b in selected if b.source not in MAB_QUERIES})
+    if missing:
+        raise GoodMemError(f"no reader template for sources: {missing}")
+    ungraded = sorted({b.source for b in selected if b.source not in GRADERS})
+    if ungraded:
+        raise GoodMemError(f"no grader for sources: {ungraded}")
     try:
         llm_id = config.models.llm_id_for(config.models.reader_model)
     except KeyError as exc:
         raise GoodMemError(str(exc)) from exc
+
+    titles: dict[str, str] = {}
+    if any(GRADERS.get(b.source) == "recall" for b in selected):
+        entity_file = dataset_dir / "entity2id.json"
+        if not entity_file.exists():
+            raise GoodMemError(
+                f"{entity_file} is missing; ReDial gold answers are integer movie "
+                "ids and cannot be scored without it"
+            )
+        titles = movie_titles(json.loads(entity_file.read_text()))
+    if any(GRADERS.get(b.source) == "summary" for b in selected) and not config.models.judge_llm_id:
+        raise GoodMemError(
+            "models.judge_llm_id is not configured; InfBench summaries are graded "
+            "by keypoint coverage, which needs a judge"
+        )
 
     path = outcomes_path(config, capability)
     already = jsonl.completed_keys(path) if resume else set()
@@ -391,7 +468,9 @@ def run_capability(
 
     with jsonl.ShardWriter(path) as shard:
         for block in selected:
-            todo = [task for task in block.tasks if task.qid not in already]
+            todo = [
+                task for task in block.tasks if outcome_id(block, task) not in already
+            ]
             if not todo:
                 continue
             space_id, units = provision_and_ingest(client, config, block)
@@ -407,6 +486,7 @@ def run_capability(
                             units,
                             task,
                             llm_id,
+                            titles,
                         )
                         for task in todo
                     ]
@@ -437,7 +517,7 @@ def summarize(outcomes: list[Outcome]) -> dict[str, Any]:
             },
         )
         bucket["questions"] += 1
-        bucket["correct"] += int(outcome.correct)
+        bucket["correct"] += outcome.partial
         bucket["errors"] += int(bool(outcome.error))
         if outcome.gold_serial is not None:
             bucket["gold_identifiable"] += 1
@@ -456,23 +536,49 @@ def summarize(outcomes: list[Outcome]) -> dict[str, Any]:
         )
         bucket["gold_identifiable_rate"] = 100.0 * identifiable / n
 
-    # The paper aggregates these capabilities as the mean of their constituent
-    # source scores, not as a mean over questions: "Accurate Retrieval,
-    # Long-Range Understanding, and Conflict Resolution average their
-    # constituent source scores" (appendix D.5). The two coincide only when
-    # every source contributes equally many questions, which is true of
-    # conflict resolution and false of accurate retrieval -- where EventQA's 500
-    # questions would otherwise outweigh RULER's 100 fivefold.
-    source_scores = [bucket["accuracy"] for bucket in by_source.values()]
     total = len(outcomes) or 1
     return {
         "questions": len(outcomes),
-        "accuracy": sum(source_scores) / len(source_scores) if source_scores else 0.0,
-        "accuracy_question_weighted": 100.0 * sum(o.correct for o in outcomes) / total,
-        "aggregation": "macro-average over source scores, per the paper's appendix D.5",
+        "accuracy": capability_score(by_source),
+        "accuracy_question_weighted": 100.0 * sum(o.partial for o in outcomes) / total,
+        "aggregation": (
+            "per the paper's appendix D.5: the mean of source scores, except "
+            "test-time learning, where the five in-context sources are averaged "
+            "first and then combined equally with ReDial"
+        ),
         "errors": sum(1 for o in outcomes if o.error),
         "by_source": by_source,
     }
+
+
+def capability_score(by_source: dict[str, dict[str, Any]]) -> float:
+    """Aggregates source scores the way the paper's appendix D.5 specifies.
+
+    Three capabilities "average their constituent source scores". Test-Time
+    Learning does not: its five in-context sources are averaged together first,
+    and that average is then weighted equally against ReDial --
+
+        TTL = (ReDial + mean(ICL_1..ICL_5)) / 2
+
+    A flat mean over its six sources instead gives the five in-context sources
+    five sixths of the weight rather than a half, which on our run reads 63.83
+    where the specified formula reads 47.50. Neither is a mean over questions,
+    which would let a source's question count decide its influence.
+
+    Args:
+      by_source: Source name to its bucket, each carrying an ``accuracy``.
+
+    Returns:
+      The capability score, or 0.0 when there are no sources.
+    """
+    if not by_source:
+        return 0.0
+    icl = [b["accuracy"] for name, b in by_source.items() if name.startswith("icl_")]
+    redial = [b["accuracy"] for name, b in by_source.items() if name.startswith("recsys_")]
+    if icl and redial:
+        return (sum(redial) / len(redial) + sum(icl) / len(icl)) / 2
+    scores = [b["accuracy"] for b in by_source.values()]
+    return sum(scores) / len(scores)
 
 
 def write_summary(config: RunConfig, capability: str, document: dict[str, Any]) -> Path:
@@ -498,3 +604,145 @@ def write_summary(config: RunConfig, capability: str, document: dict[str, Any]) 
     }
     path.write_text(json.dumps(payload, indent=2) + "\n")
     return path
+
+
+# -- per-source graders ---------------------------------------------------
+
+_LABEL_RE = re.compile(r"label\s*:?\s*(-?\d+)", re.IGNORECASE)
+_TRAILING_NUMBER_RE = re.compile(r"(-?\d+)\s*$")
+_CHOICE_PREFIX_RE = re.compile(r"^\s*([A-Z])[.)]\s*")
+_URI_TITLE_RE = re.compile(r"/resource/([^>]+)>?\s*$")
+_RECOMMENDATION_RE = re.compile(r"^\s*\d+\s*[.):]\s*(.+?)\s*$", re.MULTILINE)
+
+REDIAL_RECALL_AT = 5
+
+
+def score_label(prediction: str, answers: list[str]) -> bool:
+    """Scores an in-context-learning answer by exact numeric label.
+
+    Containment is wrong here. The labels are bare integers, so a prediction of
+    ``7`` would be scored correct against a gold of ``71`` and vice versa. The
+    reader is instructed to emit ``label: <int>``, so the label is parsed and
+    compared as a number.
+    """
+    if not prediction.strip():
+        return False
+    match = _LABEL_RE.search(prediction) or _TRAILING_NUMBER_RE.search(prediction.strip())
+    if not match:
+        return False
+    predicted = match.group(1)
+    return any(predicted == str(a).strip() for a in answers)
+
+
+def score_choice(prediction: str, answers: list[str]) -> bool:
+    """Scores a multiple-choice answer on its text rather than its letter.
+
+    The released DetectiveQA items are not internally consistent: the first
+    item's gold is ``"C. The Brandt couple"`` while option C in its own prompt
+    reads ``"Suicide"``. The letter therefore cannot be trusted, so both sides
+    are stripped to the answer text and compared on that.
+    """
+    if not prediction.strip():
+        return False
+    stripped: list[str] = []
+    for answer in answers:
+        text = _CHOICE_PREFIX_RE.sub("", str(answer)).strip()
+        if text:
+            stripped.append(text)
+    return score(prediction, stripped) if stripped else False
+
+
+def movie_titles(entity2id: dict[str, int]) -> dict[str, str]:
+    """Inverts the entity map into movie id to title.
+
+    ReDial gold answers are integer DBpedia ids, which are meaningless against a
+    reader that was asked for film names. The id resolves to a resource URI
+    whose last segment is the title.
+    """
+    out: dict[str, str] = {}
+    for uri, identifier in entity2id.items():
+        match = _URI_TITLE_RE.search(uri)
+        if match:
+            out[str(identifier)] = match.group(1).replace("_", " ")
+    return out
+
+
+def score_recall(
+    prediction: str, answers: list[str], titles: dict[str, str], at: int = REDIAL_RECALL_AT
+) -> bool:
+    """Scores a recommendation list by whether a gold film is in the top ``at``.
+
+    Args:
+      prediction: The reader's numbered recommendation list.
+      answers: Gold movie ids as strings.
+      titles: Movie id to title, from :func:`movie_titles`.
+      at: How many recommendations count, matching the benchmark's Recall@k.
+
+    Returns:
+      True when any gold film appears among the first ``at`` recommendations.
+    """
+    wanted = [titles.get(str(a), "") for a in answers]
+    wanted = [w for w in wanted if w]
+    if not wanted:
+        return False
+    items = _RECOMMENDATION_RE.findall(prediction)[:at]
+    if not items:
+        # An unnumbered reply still gets a chance, on its first lines.
+        items = [line for line in prediction.splitlines() if line.strip()][:at]
+    haystack = " ".join(" ".join(items).lower().split())
+    for title in wanted:
+        needle = " ".join(title.lower().split())
+        # Drop a DBpedia disambiguator such as "(film)" before matching.
+        needle = re.sub(r"\s*\([^)]*\)\s*$", "", needle)
+        if needle and needle in haystack:
+            return True
+    return False
+
+
+def score_summary(
+    client: GoodMemClient, config: RunConfig, summary: str, keypoints: list[str]
+) -> float | None:
+    """Scores a book summary by how many required keypoints it covers.
+
+    Returns:
+      Coverage in [0, 1], or None when the judge could not be reached or its
+      reply could not be parsed. None rather than 0.0 on purpose: a judge
+      outage and a summary that covers nothing are the same number otherwise,
+      and the first is a broken measurement while the second is a result.
+
+    The benchmark ships keypoints as the rubric for this source, so coverage is
+    the metric; containment against a 1,000-word reference summary would
+    measure nothing.
+    """
+    points = [str(k).strip() for k in keypoints if str(k).strip()]
+    if not points or not summary.strip():
+        return 0.0
+    listed = "\n".join(f"{i + 1}. {point}" for i, point in enumerate(points))
+    try:
+        text = client.chat_completion(
+            config.models.judge_llm_id,
+            [
+                {"role": "system", "content": MAB_SUMMARY_JUDGE_SYSTEM},
+                {
+                    "role": "user",
+                    "content": MAB_SUMMARY_JUDGE_USER.format(
+                        summary=summary[:60000], keypoints=listed
+                    ),
+                },
+            ],
+            model=config.models.judge_model,
+        ).text
+    except Exception:  # noqa: BLE001 - surfaced as an error, not as zero coverage
+        return None
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        return None
+    try:
+        verdict = json.loads(match.group(0))
+        covered = float(verdict.get("covered", 0))
+        total = float(verdict.get("total") or len(points))
+    except (ValueError, TypeError):
+        return None
+    if total <= 0:
+        return None
+    return max(0.0, min(1.0, covered / total))

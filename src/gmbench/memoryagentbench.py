@@ -82,6 +82,27 @@ UNITS: dict[str, str] = {
     "factconsolidation_mh": UNIT_FACT,
 }
 
+# How each source is graded. Containment is wrong for three of them: a numeric
+# label needs exact equality (predicting 7 must not score for gold 71), a movie
+# recommendation needs recall over an id list, and a 1,000-word book summary
+# needs a judge against the keypoints the benchmark ships.
+GRADERS: dict[str, str] = {
+    "eventqa": "contains",
+    "longmemeval": "contains",
+    "ruler_qa1": "contains",
+    "ruler_qa2": "contains",
+    "factconsolidation_sh": "contains",
+    "factconsolidation_mh": "contains",
+    "icl_banking77": "label",
+    "icl_clinic150": "label",
+    "icl_nlu": "label",
+    "icl_trec_coarse": "label",
+    "icl_trec_fine": "label",
+    "recsys_redial": "recall",
+    "detective_qa": "choice",
+    "infbench_sum": "summary",
+}
+
 _LENGTH_SUFFIX_RE = re.compile(r"_(?:\d+|\d+k|full)$", re.IGNORECASE)
 _DOCUMENT_SPLIT_RE = re.compile(r"(?m)^(?=Document \d+:)")
 _DIALOGUE_SPLIT_RE = re.compile(r"(?m)^(?=Dialogue \d+:)")
@@ -347,8 +368,25 @@ def load(
                 continue
 
             ids = meta.get("qa_pair_ids") or []
-            keypoints = meta.get("keypoints") or []
+            raw_keypoints = list(meta.get("keypoints") or [])
             events = meta.get("previous_events") or []
+
+            def keypoints_for(index: int, count: int = len(qs)) -> tuple[str, ...]:
+                """Assigns a question its grading keypoints.
+
+                InfBench ships one question per block with 25 keypoints for it,
+                while DetectiveQA ships one keypoint per question. Taking the
+                i-th element in both cases hands InfBench a single keypoint out
+                of 25 and grades a book summary against a twenty-fifth of its
+                rubric.
+                """
+                if not raw_keypoints:
+                    return ()
+                if count == 1:
+                    return tuple(str(k) for k in raw_keypoints)
+                if index < len(raw_keypoints):
+                    return (str(raw_keypoints[index]),)
+                return ()
             tasks = tuple(
                 Task(
                     qid=str(ids[i]) if i < len(ids) else f"{label}-{row}-{i}",
@@ -358,7 +396,7 @@ def load(
                     question=str(q),
                     answers=tuple(str(a) for a in (ans[i] if i < len(ans) else []) or []),
                     demo=meta.get("demo"),
-                    keypoints=tuple(str(k) for k in (keypoints[i:i + 1] or [])),
+                    keypoints=keypoints_for(i),
                     previous_events=events[i] if i < len(events) else None,
                 )
                 for i, q in enumerate(qs)
