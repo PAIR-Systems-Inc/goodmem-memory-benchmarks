@@ -1318,3 +1318,37 @@ def test_multi_row_sources_exist_so_the_collision_is_reachable() -> None:
     multi = {label: n for label, n in per_label.items() if n > 1}
     assert multi, "expected sources shipping several rows under one label"
     assert max(multi.values()) >= 10
+
+
+# -- paginated listings --------------------------------------------------
+
+
+def test_list_spaces_follows_pagination(monkeypatch) -> None:
+    """Every page must be collected, not just the first.
+
+    The caller uses this listing to decide whether a space already exists. A
+    space on page two reads as absent, so the create that follows fails with
+    409 and the run dies. It stayed hidden while a run made 14 spaces and
+    surfaced the moment one made 130.
+    """
+    from gmbench.client import GoodMemClient
+
+    client = GoodMemClient("https://example.invalid", "key", tls_verify=False)
+    pages = [
+        {"spaces": [{"name": f"s{i}"} for i in range(50)], "nextToken": "t1"},
+        {"spaces": [{"name": f"s{i}"} for i in range(50, 90)], "nextToken": ""},
+    ]
+    seen: list[dict] = []
+
+    def _request(method, path, params=None, **kwargs):
+        assert method == "GET" and path == "/v1/spaces"
+        seen.append(dict(params or {}))
+        return pages[len(seen) - 1]
+
+    monkeypatch.setattr(client, "_request", _request)
+    names = [s["name"] for s in client.list_spaces()]
+
+    assert len(names) == 90, "second page was dropped"
+    assert names[-1] == "s89"
+    assert "nextToken" not in seen[0]
+    assert seen[1]["nextToken"] == "t1", "token from page one was not sent"

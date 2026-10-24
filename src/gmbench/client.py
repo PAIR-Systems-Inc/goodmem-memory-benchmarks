@@ -229,8 +229,25 @@ class GoodMemClient:
         return self._request("POST", "/v1/spaces", json=body)
 
     def list_spaces(self) -> list[dict[str, Any]]:
-        payload = self._request("GET", "/v1/spaces") or {}
-        return payload.get("spaces", [])
+        """Lists every space, following pagination.
+
+        The first page is 50, and dropping the rest is not a cosmetic bug: the
+        caller uses this to decide whether a space already exists, so a space on
+        page two reads as absent and the create that follows fails with 409.
+        That stayed hidden while a run made 14 spaces and surfaced the moment it
+        made 130.
+        """
+        out: list[dict[str, Any]] = []
+        params: dict[str, Any] = {"pageSize": 500}
+        token: str | None = None
+        while True:
+            if token:
+                params["nextToken"] = token
+            payload = self._request("GET", "/v1/spaces", params=params) or {}
+            out.extend(payload.get("spaces", []))
+            token = payload.get("nextToken") or None
+            if not token:
+                return out
 
     def delete_space(self, space_id: str) -> None:
         self._request("DELETE", f"/v1/spaces/{space_id}")
