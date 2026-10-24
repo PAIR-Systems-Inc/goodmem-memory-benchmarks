@@ -119,9 +119,26 @@ Model ids in the committed config point at the registrations on the development
 instance. `goodmem embedder list` and `goodmem reranker list` show what is
 available.
 
+## Keeping the comparison honest
+
+The reader and the judge are held at the paper's models on purpose. Swapping in
+a stronger reader would raise the score without saying anything about
+retrieval, which is the thing under test — so the only moving parts here are
+the embedder, the reranker, and the retrieval configuration.
+
+That puts a dependency on `gpt-4o-mini` and `gpt-4.1-mini` still being
+serviceable. If either has been retired, a run can still be scored, but it is no
+longer directly comparable to 89.07 or 93.70 and should be reported with the
+substitute reader named. The honest fallback is to run the paper's retrieval
+configuration through the same substitute reader and compare against that.
+
 ## Status
 
-Scaffolding and the LoCoMo path are in place and exercised against a live
-instance. Ingest and retrieval are verified end to end; the reader and judge
-stages are written to the paper's prompts and parse rules but have not yet been
-run, pending an `OPENAI_API_KEY`.
+The LoCoMo path is in place and exercised against a live instance:
+
+- **Ingest** — verified. 5,882 turns across ten conversations, all indexed.
+- **Retrieval** — verified, including the reranking stage and turn expansion.
+- **Coverage** — verified; this is the stage to tune on.
+- **Reader and judge** — written to the paper's prompts and parse rules, with
+  unit tests over the grading logic, but not yet run against the API. Needs
+  `OPENAI_API_KEY`.
