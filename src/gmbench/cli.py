@@ -507,7 +507,7 @@ def cmd_table(args: argparse.Namespace, console: Console) -> int:
         console.print("[yellow]No summaries found; run the stages first.[/yellow]")
         return 1
 
-    text = markdown.document(rows, labelled)
+    text = markdown.document(rows, labelled, cfg.results_dir)
     if args.out:
         out = Path(args.out)
         out.write_text(text)

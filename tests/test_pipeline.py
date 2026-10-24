@@ -1275,3 +1275,46 @@ def test_collect_dense_is_callable_end_to_end(monkeypatch, tmp_path) -> None:
     assert rows[0].qid == question.qid
     assert len(rows[0].documents) == 5
     assert (cfg.run_dir / "dense-candidates.jsonl").exists()
+
+
+# -- one store per block -------------------------------------------------
+
+
+@needs_mab
+def test_every_block_gets_its_own_space_name() -> None:
+    """Two blocks must never share a space name.
+
+    A source ships many rows, each a self-contained document store, and several
+    rows share one label. Naming the space after the label collided them, so a
+    row was answered against whichever row had last been ingested -- and the
+    reuse check passed, because a space holding another block's documents is
+    full, COMPLETED and indistinguishable from a correct one. It cost 607 of
+    2,071 questions, concentrated entirely in the multi-row sources, and it is
+    invisible in the output: the reader simply says the context does not
+    mention the answer.
+    """
+    from gmbench import memoryagentbench as mab
+    from gmbench.mab_run import space_name
+
+    blocks = mab.load(MAB_DIR)
+    names = [space_name(block, "tag") for block in blocks]
+    duplicates = {name for name in names if names.count(name) > 1}
+    assert not duplicates, f"blocks sharing a space name: {sorted(duplicates)[:5]}"
+    assert len(names) == len(blocks)
+
+
+@needs_mab
+def test_multi_row_sources_exist_so_the_collision_is_reachable() -> None:
+    """Guards the test above against becoming vacuous.
+
+    If every source were single-row the collision could not occur and the
+    assertion would pass for the wrong reason.
+    """
+    from collections import Counter
+
+    from gmbench import memoryagentbench as mab
+
+    per_label = Counter(block.label for block in mab.load(MAB_DIR))
+    multi = {label: n for label, n in per_label.items() if n > 1}
+    assert multi, "expected sources shipping several rows under one label"
+    assert max(multi.values()) >= 10

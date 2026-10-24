@@ -211,6 +211,20 @@ def render_context(units: list[Unit]) -> str:
     return "[Knowledge Pool]\n" + "\n".join(unit.text for unit in ordered)
 
 
+def space_name(block: Block, run_tag: str) -> str:
+    """Returns the space name holding one block's documents.
+
+    Keyed on the block id, not the label. A source ships many rows, each a
+    self-contained document store, and several rows share one label. Keying on
+    the label collided them, so a row was answered against whichever row had
+    last been ingested, and the reuse check could not tell: a space full of
+    another block's documents is populated, COMPLETED and indistinguishable
+    from a correct one. It cost 607 of 2,071 questions, concentrated entirely
+    in the multi-row sources.
+    """
+    return f"gmbench-mab-{block.block_id}-{run_tag}"[:255]
+
+
 def provision_and_ingest(
     client: GoodMemClient, config: RunConfig, block: Block
 ) -> tuple[str, list[Unit]]:
@@ -226,7 +240,7 @@ def provision_and_ingest(
     if not units:
         raise GoodMemError(f"{block.block_id}: context produced no ingestion units")
 
-    name = f"gmbench-mab-{block.label}-{config.run_tag}"[:255]
+    name = space_name(block, config.run_tag)
 
     # Idempotent: a re-run should reuse a fact pool that is already stored
     # rather than fail on the name, and should rebuild one that is incomplete
@@ -234,8 +248,17 @@ def provision_and_ingest(
     existing = next((s for s in client.list_spaces() if s.get("name") == name), None)
     if existing is not None:
         space_id = existing["spaceId"]
-        statuses = [m.get("processingStatus") for m in client.list_memories(space_id)]
-        if statuses.count("COMPLETED") >= len(units) and "FAILED" not in statuses:
+        stored = client.list_memories(space_id)
+        statuses = [m.get("processingStatus") for m in stored]
+        owners = {(m.get("metadata") or {}).get("block_id") for m in stored}
+        # Belt and braces: the name now carries the block id, so a mismatch
+        # should be impossible. Check anyway, because the failure this guards
+        # against is invisible in the results it produces.
+        if owners - {block.block_id}:
+            tqdm.write(
+                f"{block.block_id}: space holds other blocks {sorted(owners)}; rebuilding it"
+            )
+        elif statuses.count("COMPLETED") >= len(units) and "FAILED" not in statuses:
             tqdm.write(f"{block.source}: reusing {len(units)} facts already stored")
             return space_id, units
         tqdm.write(

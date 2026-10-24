@@ -80,3 +80,70 @@ Integrity: clean (1540 questions scored).
 Mean evidence supplied to the reader: 107 turns, 19,386 characters (~4,847 tokens).
 
 Integrity: clean (1540 questions scored).
+
+---
+
+## Was the reranker substitution material?
+
+No. The paper's own checkpoint retrieves 2.4 points more gold evidence, feeding a reader already statistically tied with RAW-RAG.
+
+Measured on 1,322 of 1,540 questions —
+those carrying resolvable evidence annotations — over an identical index
+and identical dense candidate sets (128 per question).
+
+| Stage | All gold evidence in top-15 | Mean gold recall |
+|---|---:|---:|
+| GoodMem dense top-15, no rerank | 69.4% | 76.2% |
+| + hosted `qwen3-rerank` (the scored runs) | 79.7% | 86.5% |
+| + `Qwen3-Reranker-4B`, the paper's own | 82.1% | 88.6% |
+
+---
+
+## MemoryAgentBench
+
+Aggregation follows the paper's appendix D.5: three capabilities average
+their source scores, while Test-Time Learning averages its five
+in-context sources first and then weights that against ReDial equally.
+
+| Capability | N | GoodMem | RAW-RAG | Verdict | Errors |
+|---|---:|---:|---:|---|---:|
+| Accurate Retrieval | 1000 | 54.10 | 67.85 | behind (-13.75) | 0 |
+| Test-Time Learning | 700 | 46.35 | 47.68 | behind (-1.33) | 0 |
+| Long-Range Understanding | 171 | 18.31 | 31.74 | behind (-13.43) | 0 |
+| Conflict Resolution | 200 | 51.50 | 46.00 | ahead (+5.50) | 0 |
+| **Overall** (mean of four) | 2071 | **42.56** | 48.32 | behind (-5.75) | — |
+
+### By source
+
+| Capability | Source | N | Accuracy | Errors |
+|---|---|---:|---:|---:|
+| Accurate Retrieval | `ruler_qa1` | 100 | 88.00 | 0 |
+| Accurate Retrieval | `ruler_qa2` | 100 | 69.00 | 0 |
+| Accurate Retrieval | `eventqa` | 500 | 48.40 | 0 |
+| Accurate Retrieval | `longmemeval` | 300 | 11.00 | 0 |
+| Test-Time Learning | `recsys_redial` | 200 | 20.50 | 0 |
+| Test-Time Learning | `icl_banking77` | 100 | 87.00 | 0 |
+| Test-Time Learning | `icl_clinic150` | 100 | 86.00 | 0 |
+| Test-Time Learning | `icl_nlu` | 100 | 86.00 | 0 |
+| Test-Time Learning | `icl_trec_coarse` | 100 | 61.00 | 0 |
+| Test-Time Learning | `icl_trec_fine` | 100 | 41.00 | 0 |
+| Long-Range Understanding | `infbench_sum` | 100 | 0.00 | 0 |
+| Long-Range Understanding | `detective_qa` | 71 | 36.62 | 0 |
+| Conflict Resolution | `factconsolidation_mh` | 100 | 9.00 | 0 |
+| Conflict Resolution | `factconsolidation_sh` | 100 | 94.00 | 0 |
+
+---
+
+## BEAM-1M — ingestion cost
+
+Not an accuracy benchmark. One ordered conversation is streamed in a
+message at a time, each Add followed by a poll until the memory reports
+COMPLETED, outer concurrency one.
+
+| | |
+|---|---:|
+| Conversation | `1` — Building a Multi-Language AI Chatbot with Contextual Memory |
+| Messages ingested | 1710 of 1710 |
+| Approximate tokens | 1,061,523 |
+| Total time | 1.43 h (5136 s) |
+| Mean per message | 3.004 s |

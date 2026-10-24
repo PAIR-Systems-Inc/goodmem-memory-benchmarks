@@ -150,7 +150,9 @@ def coverage_table(summary_path: Path) -> str:
     )
 
 
-def document(rows: list[Row], run_dirs: dict[str, Path]) -> str:
+def document(
+    rows: list[Row], run_dirs: dict[str, Path], results_dir: Path | None = None
+) -> str:
     """Renders the whole results document.
 
     Every number here is read from a run's ``summary-*.json``. Nothing is typed,
@@ -203,4 +205,165 @@ def document(rows: list[Row], run_dirs: dict[str, Path]) -> str:
             f"({row.questions} questions scored).",
             "",
         ]
+
+    # The other benchmarks render from their own export summaries. Each returns
+    # nothing when unmeasured, so this document describes only what was run.
+    if results_dir is not None:
+        for extra in (
+            reranker_section(results_dir),
+            mab_section(results_dir),
+            beam_section(results_dir),
+        ):
+            if extra:
+                parts += ["---", ""] + extra
     return "\n".join(parts)
+
+
+# MemoryAgentBench reference figures, from the paper's table 4 (RAW-RAG,
+# gpt-4o-mini). Kept beside the renderer that uses them so a reader can check
+# them against the paper in one place.
+MAB_PAPER_RAW_RAG: dict[str, float] = {
+    "accurate_retrieval": 67.85,
+    "test_time_learning": 47.68,
+    "long_range_understanding": 31.74,
+    "conflict_resolution": 46.00,
+}
+_MAB_PRETTY = {
+    "accurate_retrieval": "Accurate Retrieval",
+    "test_time_learning": "Test-Time Learning",
+    "long_range_understanding": "Long-Range Understanding",
+    "conflict_resolution": "Conflict Resolution",
+}
+_MAB_ORDER = (
+    "accurate_retrieval",
+    "test_time_learning",
+    "long_range_understanding",
+    "conflict_resolution",
+)
+
+
+def _find_summary(results_dir: Path, pattern: str) -> Path | None:
+    """Returns the single export summary matching a glob, or None."""
+    hits = sorted(results_dir.glob(pattern))
+    return hits[0] if hits else None
+
+
+def mab_section(results_dir: Path) -> list[str]:
+    """Renders the MemoryAgentBench tables from each capability's summary.
+
+    Returns an empty list when no capability has been scored, so a partial
+    checkout does not produce a section full of blanks.
+    """
+    found: dict[str, dict] = {}
+    for path in sorted(results_dir.glob("*/export/mab-*-summary-*.json")):
+        data = json.loads(path.read_text())
+        found[data["capability"]] = data
+    if not found:
+        return []
+
+    lines = [
+        "## MemoryAgentBench",
+        "",
+        "Aggregation follows the paper's appendix D.5: three capabilities average",
+        "their source scores, while Test-Time Learning averages its five",
+        "in-context sources first and then weights that against ReDial equally.",
+        "",
+        "| Capability | N | GoodMem | RAW-RAG | Verdict | Errors |",
+        "|---|---:|---:|---:|---|---:|",
+    ]
+    scores, questions = [], 0
+    for key in _MAB_ORDER:
+        data = found.get(key)
+        if data is None:
+            continue
+        ours = float(data["accuracy"])
+        theirs = MAB_PAPER_RAW_RAG[key]
+        delta = ours - theirs
+        call = "ahead" if delta > 0 else "behind"
+        scores.append(ours)
+        questions += int(data["questions"])
+        lines.append(
+            f"| {_MAB_PRETTY[key]} | {data['questions']} | {ours:.2f} | "
+            f"{theirs:.2f} | {call} ({delta:+.2f}) | {data['errors']} |"
+        )
+    if len(scores) == len(_MAB_ORDER):
+        ours = sum(scores) / len(scores)
+        theirs = sum(MAB_PAPER_RAW_RAG[k] for k in _MAB_ORDER) / len(_MAB_ORDER)
+        lines.append(
+            f"| **Overall** (mean of four) | {questions} | **{ours:.2f}** | "
+            f"{theirs:.2f} | behind ({ours - theirs:+.2f}) | — |"
+        )
+    else:
+        missing = [_MAB_PRETTY[k] for k in _MAB_ORDER if k not in found]
+        lines.append(f"| **Overall** | — | not computed | — | missing: {', '.join(missing)} | — |")
+
+    lines += ["", "### By source", "", "| Capability | Source | N | Accuracy | Errors |", "|---|---|---:|---:|---:|"]
+    for key in _MAB_ORDER:
+        data = found.get(key)
+        if data is None:
+            continue
+        for source, stats in data.get("by_source", {}).items():
+            lines.append(
+                f"| {_MAB_PRETTY[key]} | `{source}` | {stats['questions']} | "
+                f"{stats['accuracy']:.2f} | {stats['errors']} |"
+            )
+    lines.append("")
+    return lines
+
+
+def beam_section(results_dir: Path) -> list[str]:
+    """Renders the BEAM ingestion-cost summary, if one was measured."""
+    path = _find_summary(results_dir, "*/export/beam-summary.json")
+    if path is None:
+        return []
+    d = json.loads(path.read_text())
+    return [
+        "## BEAM-1M — ingestion cost",
+        "",
+        "Not an accuracy benchmark. One ordered conversation is streamed in a",
+        "message at a time, each Add followed by a poll until the memory reports",
+        "COMPLETED, outer concurrency one.",
+        "",
+        "| | |",
+        "|---|---:|",
+        f"| Conversation | `{d['conversation_id']}` — {d['conversation_title']} |",
+        f"| Messages ingested | {d['messages_ingested']} of {d['messages_total']} |",
+        f"| Approximate tokens | {d['approximate_tokens']:,} |",
+        f"| Total time | {d['cumulative_hours']:.2f} h ({d['cumulative_seconds']:.0f} s) |",
+        f"| Mean per message | {d['mean_seconds_per_message']:.3f} s |",
+        "",
+    ]
+
+
+def reranker_section(results_dir: Path) -> list[str]:
+    """Renders the reranker-substitution comparison, if it was measured."""
+    path = _find_summary(results_dir, "*/export/reranker-comparison.json")
+    if path is None:
+        return []
+    d = json.loads(path.read_text())
+    stages = d["stages"]
+    label = {
+        "dense": "GoodMem dense top-15, no rerank",
+        "substitute": "+ hosted `qwen3-rerank` (the scored runs)",
+        "paper_exact": "+ `Qwen3-Reranker-4B`, the paper's own",
+    }
+    lines = [
+        "## Was the reranker substitution material?",
+        "",
+        d["answer"],
+        "",
+        f"Measured on {d['questions']:,} of {d['questions_total']:,} questions —",
+        "those carrying resolvable evidence annotations — over an identical index",
+        f"and identical dense candidate sets ({d['dense_candidates_per_question']} per question).",
+        "",
+        "| Stage | All gold evidence in top-15 | Mean gold recall |",
+        "|---|---:|---:|",
+    ]
+    for key in ("dense", "substitute", "paper_exact"):
+        s = stages[key]
+        lines.append(
+            f"| {label[key]} | {s['all_gold_in_top_15_pct']:.1f}% | "
+            f"{s['mean_gold_recall_pct']:.1f}% |"
+        )
+    lines.append("")
+    return lines
