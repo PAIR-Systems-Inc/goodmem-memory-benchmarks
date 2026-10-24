@@ -77,8 +77,10 @@ by `gmbench table` from the run summaries rather than typed by hand. The per-que
 | **Paper models, paper reranker** | `gpt-4.1-mini` | 93.42 | [92.19, 94.59] | 93.70 — tie | 91.69 — **ahead** |
 | Paper models, hosted substitute | `gpt-4o-mini` | 88.72 | [87.19, 90.24] | 89.07 — tie | 88.12 — tie |
 | Paper models, hosted substitute | `gpt-4.1-mini` | 93.23 | [91.99, 94.42] | 93.70 — tie | 91.69 — **ahead** |
-| Voyage | `gpt-4o-mini` | 87.84 | [86.19, 89.37] | 89.07 — tie | 88.12 — tie |
-| Voyage | `gpt-4.1-mini` | **94.29** | [93.14, 95.37] | 93.70 — tie | 91.69 — **ahead** |
+| Voyage `rerank-2.5` | `gpt-4o-mini` | 87.84 | [86.19, 89.37] | 89.07 — tie | 88.12 — tie |
+| Voyage `rerank-2.5` | `gpt-4.1-mini` | 94.29 | [93.14, 95.37] | 93.70 — tie | 91.69 — **ahead** |
+| Voyage `rerank-3` | `gpt-4o-mini` | 88.44 | [86.82, 89.98] | 89.07 — tie | 88.12 — tie |
+| Voyage `rerank-3` | `gpt-4.1-mini` | **94.35** | [93.20, 95.45] | 93.70 — tie | 91.69 — **ahead** |
 
 The first two rows are the comparable ones: the paper's embedder
 (`text-embedding-3-small`) and the paper's own reranker checkpoint
@@ -86,7 +88,7 @@ The first two rows are the comparable ones: the paper's embedder
 serves it correctly. The substitute rows are kept because the pair answers a
 question worth answering — see below.
 
-Statistically tied with RAW-RAG in all six, and ahead of MemMachine — the
+Statistically tied with RAW-RAG in all eight, and ahead of MemMachine — the
 strongest agentic system in the paper's comparison — on every `gpt-4.1-mini`
 row. The paper-models configurations reach that on **~2,700 evidence tokens
 against the paper's ~4,800**, a little over half the context budget.
@@ -101,8 +103,8 @@ falls **0.13 points**, to 93.29, and still ties RAW-RAG's 93.70. No verdict in
 this table turns on it.
 
 The cap was deliberately left at 4,096 rather than raised for this row alone.
-Raising it would have made the row less comparable to the other five, which all
-used 4,096 and all came back clean — the opposite of the point. The other five
+Raising it would have made the row less comparable to the other seven, which all
+used 4,096 and all came back clean — the opposite of the point. The other seven
 rows are clean: 4,620 judgements each, no reader or judge failures.
 
 > **One gap remains, and it is pending rather than closed.** Cohere Rerank-v3.5,
@@ -305,19 +307,58 @@ done
 # 3. Regenerate the tables with the new row included:
 gmbench --config config/locomo-paper.toml table \
         --runs "Cohere=paper-cohere" "Paper reranker=paper-exact" \
-                "Hosted substitute=paper-qwen3" "Voyage=voyage4l-k30" \
+                "Hosted substitute=paper-qwen3" \
+                "Voyage rerank-2.5=voyage4l-k30" \
+                "Voyage rerank-3=voyage4l-rerank3" \
         --out RESULTS.md
 ```
 
 `verify-reranker` exits non-zero if the reranker scores below the dense-only
 baseline, which is what caught a broken endpoint here once already.
 
-### The Voyage configuration
+### The Voyage rows, and what a newer reranker is worth
 
-`voyage-4-large` + `rerank-2.5` is reported as a separate row, not the headline,
-because a model the paper did not use beating one it did says nothing about the
-memory system. Voyage also shipped `rerank-3` on 2026-09-30, which claims to beat
-Cohere Rerank-v4.0 Pro; this repository does not use it, for the same reason.
+`voyage-4-large` + Voyage reranking is reported as separate rows, never the
+headline, because a model the paper did not use beating one it did says nothing
+about the memory system. They are there to answer a different question: what does
+this pipeline do when it is *not* held to the paper's 2024-era retrieval stack?
+
+Voyage shipped `rerank-3` on 2026-09-30, claiming to beat Cohere Rerank-v4.0 Pro.
+Both generations are scored here, against the same index and the same dense
+candidates, so the reranker version is the only variable:
+
+| | `gpt-4o-mini` | `gpt-4.1-mini` |
+|---|---:|---:|
+| `rerank-2.5` | 87.84 | 94.29 |
+| `rerank-3` | 88.44 | 94.35 |
+| difference | +0.60 | +0.06 |
+
+Both differences sit inside this measurement's 0.67-point noise floor. A reranker
+generation — one that moved the needle enough for its vendor to publish
+comparisons against the frontier — is **indistinguishable** here.
+
+Retrieval says the same thing, and says it before any reader tokens are spent.
+Over all 1,540 questions, `rerank-3` is fractionally *behind*:
+
+| Coverage at k=30 | `rerank-2.5` | `rerank-3` |
+|---|---:|---:|
+| All gold evidence retrieved | 94.92% | 94.27% |
+| Any gold evidence retrieved | 99.09% | 98.89% |
+| Mean gold recall | 97.39% | 97.05% |
+| Gold evidence in top-k | 97.52% | 97.26% |
+
+At 97.5% gold-in-top-30 there is almost nothing left for a better reranker to
+find. Coverage bounds accuracy from above, and the bound is already nearly
+saturated, so the two generations converge on the same score from slightly
+different retrievals — the accuracy difference changes sign relative to the
+coverage difference, which is what "inside the noise floor" looks like in
+practice.
+
+This is the paper's own `final_k` ablation arriving by a different route. It
+found accuracy flat from 15 to 60 selections; this finds accuracy flat across a
+reranker generation. Both say the same thing: once the evidence is in the
+context at all, the retrieval stage has stopped being the binding constraint.
+Which is the paper's thesis, tested on a component the paper never saw.
 
 ---
 
@@ -362,8 +403,8 @@ plausible number is not, so the harness is built to make the second impossible.
   the paper's own extraction rule, not a fallback this harness invented. So the
   flag on such a row is the gate being conservative about paper-faithful
   behaviour, which is why the one flagged row here is bounded rather than
-  re-run. Five of the six LoCoMo rows are clean; the sixth is flagged, and the
-  flag is quantified beside the table rather than explained away.
+  re-run. Seven of the eight LoCoMo rows are clean; the eighth is flagged, and
+  the flag is quantified beside the table rather than explained away.
 - **Stream verification.** The server frames each result set as BEGIN, items, END
   and states how many items to expect. All three are checked, so a truncated
   response cannot return a shorter, plausible result set.

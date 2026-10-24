@@ -1,0 +1,87 @@
+{
+  "benchmark": "locomo",
+  "run_tag": "voyage4l-rerank3",
+  "ingest_tag": "voyage4l-rerank25",
+  "reader_model": "gpt-4o-mini",
+  "judge_model": "gpt-4o-mini-2024-07-18",
+  "judge_repetitions": 3,
+  "embedder": {
+    "provider": "VOYAGE",
+    "model": "voyage-4-large",
+    "display_name": "Voyage 4 Large"
+  },
+  "reranker": {
+    "provider": "VOYAGE",
+    "model": "rerank-3",
+    "display_name": "voyage-rerank-3"
+  },
+  "retrieval": {
+    "dense_candidates": 128,
+    "final_k": 30,
+    "neighbor_turns": 2,
+    "ef_search": 400,
+    "iterative_scan": "ITERATIVE_SCAN_RELAXED_ORDER"
+  },
+  "chunking": {
+    "chunk_size": 1500,
+    "chunk_overlap": 150,
+    "length_measurement": "CHARACTER_COUNT"
+  },
+  "evidence": {
+    "mean_chars": 19284.262987012986,
+    "mean_turns": 106.79480519480519
+  },
+  "integrity": {
+    "questions": 1540,
+    "reader_errors": 0,
+    "reader_truncated": 0,
+    "reader_missing_final_marker": 0,
+    "judge_infrastructure_failures": 0,
+    "judge_unparseable": 0,
+    "judgements_expected": 4620,
+    "judgements_present": 4620,
+    "clean": true,
+    "problems": []
+  },
+  "scores": [
+    {
+      "slice": "multi_hop",
+      "questions": 282,
+      "accuracy": 88.0614657210402,
+      "ci_low": 84.2789598108747,
+      "ci_high": 91.725768321513
+    },
+    {
+      "slice": "open_domain",
+      "questions": 96,
+      "accuracy": 71.875,
+      "ci_low": 62.84722222222223,
+      "ci_high": 80.55555555555556
+    },
+    {
+      "slice": "single_hop",
+      "questions": 841,
+      "accuracy": 94.68886246531908,
+      "ci_low": 93.14308363059851,
+      "ci_high": 96.15537059056678
+    },
+    {
+      "slice": "temporal",
+      "questions": 321,
+      "accuracy": 77.36240913811008,
+      "ci_low": 72.7933541017653,
+      "ci_high": 81.72377985462097
+    },
+    {
+      "slice": "overall",
+      "questions": 1540,
+      "accuracy": 88.44155844155844,
+      "ci_low": 86.81818181818181,
+      "ci_high": 89.97835497835499
+    }
+  ],
+  "bootstrap": {
+    "resamples": 10000,
+    "seed": 20261023
+  }
+}
