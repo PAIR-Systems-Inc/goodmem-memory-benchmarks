@@ -77,8 +77,18 @@ done
 
 Register Cohere Rerank-v3.5 with its provider credential before running this
 example. These commands use the supported environment variables for both model
-registrations. Reporting reads the embedder from configuration, so it must agree
-with the reused index.
+registrations.
+
+Registering a Cohere reranker takes a `POST` to `/v1/rerankers` with
+`providerType` `COHERE`, `endpointUrl` `https://api.cohere.com` and the API key
+as an inline secret; leave `apiPath` unset and the server uses Cohere's
+`/v2/rerank`. The key is then held in the GoodMem instance rather than in this
+repository or in the client's environment.
+
+Reporting resolves the embedder from the space the run queried, not from
+configuration, so a mismatched `GMBENCH_EMBEDDER_ID` no longer mislabels the
+summary. Keeping it consistent with the reused index is still worth doing,
+because `verify-reranker` and any fresh ingest do use the configured value.
 
 ## Run Qwen3-Reranker-4B locally
 

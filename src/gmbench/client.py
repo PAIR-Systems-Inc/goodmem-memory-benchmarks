@@ -102,6 +102,20 @@ class RetrievedChunk:
     result_set_id: str = ""
 
 
+def space_embedder_id(record: dict[str, Any]) -> str:
+    """Pick the embedder a space record is bound to.
+
+    A space may carry several embedders with retrieval weights; the one with the
+    highest weight is the one a plain query goes through. Returns "" when the
+    record names none, so a caller can fall back rather than assert.
+    """
+    bindings = record.get("spaceEmbedders") or []
+    if not bindings:
+        return str(record.get("embedderId") or "")
+    best = max(bindings, key=lambda b: float(b.get("defaultRetrievalWeight") or 0.0))
+    return str(best.get("embedderId") or "")
+
+
 class GoodMemClient:
     """Synchronous GoodMem REST client."""
 
@@ -242,6 +256,16 @@ class GoodMemClient:
             token = payload.get("nextToken") or None
             if not token:
                 return out
+
+    def space_embedder_id(self, space_id: str) -> str:
+        """Return the embedder a space is bound to, or "" if it cannot be read.
+
+        A space carries its own embedder, chosen when it was created. Retrieval
+        uses that one, whatever the client's config says, so this is the only
+        source that describes what a run actually queried.
+        """
+        record = self._request("GET", f"/v1/spaces/{space_id}") or {}
+        return space_embedder_id(record)
 
     def delete_space(self, space_id: str) -> None:
         self._request("DELETE", f"/v1/spaces/{space_id}")

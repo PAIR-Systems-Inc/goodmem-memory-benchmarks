@@ -30,33 +30,43 @@ fragments.
 
 | Configuration | Embedder | Reranker | Selected chunks |
 |---|---|---|---:|
+| Table 10 stack | `text-embedding-3-small` | Cohere `rerank-v3.5` | 15 |
+| Local Qwen checkpoint | `text-embedding-3-small` | `Qwen/Qwen3-Reranker-4B`, int8 | 15 |
 | Hosted Qwen | `text-embedding-3-small` | DashScope `qwen3-rerank` | 15 |
-| Local Qwen checkpoint | See attribution note below | `Qwen/Qwen3-Reranker-4B`, int8 | 15 |
+| Cohere v5.0 Pro | `text-embedding-3-small` | Cohere `rerank-v5.0-pro` | 15 |
 | Voyage 2.5 | `voyage-4-large` | `rerank-2.5` | 30 |
 | Voyage 3 | `voyage-4-large` | `rerank-3` | 30 |
 
 Paper table 10 uses `text-embedding-3-small` with Cohere Rerank-v3.5; table 11
-uses Qwen3-Embedding-4B with Qwen3-Reranker-4B. The hosted Qwen configuration uses
-table 10's embedder with a substitute reranker. The local scorer uses table 11's
-reranker checkpoint at int8 precision. Neither configuration reproduces a
-complete row from the paper. The published results here do not include a Cohere
-Rerank-v3.5 run.
+uses Qwen3-Embedding-4B with Qwen3-Reranker-4B.
 
-Model attribution for `paper-exact` is incomplete. Its summary records
-`voyage-4-large`, while its reranker-comparison record names
-`text-embedding-3-small`. The committed `gpt-4o-mini` summary also labels the
-reranker `rerank-2.5`, whereas the local provenance file names Qwen3-Reranker-4B.
-These records do not establish an exact model-matched comparison. The
-`gpt-4.1-mini` score appears in RESULTS.md, but its answer and judgement exports
-are not currently committed. Treat these rows as supplementary measurements.
+The table 10 stack reproduces that row's models and depths. It is served through
+GoodMem's own reranking stage and carries no deviations to disclose.
+
+The other configurations at depth 15 share table 10's embedder and change only
+the reranker. The local Qwen checkpoint is table 11's reranker at int8 precision,
+scored outside GoodMem because no endpoint here applies the yes/no relevance
+template the checkpoint requires; `tools/qwen3_reranker.py` applies it, and
+GoodMem supplies the index and the dense candidates. Table 11's embedder,
+Qwen3-Embedding-4B, is not served on this instance, so no configuration here
+reproduces table 11 in full.
+
+Earlier versions of this file reported that `paper-exact` carried conflicting
+model labels. That was a real defect with a single cause: the summary named the
+embedder from the run's configuration rather than the one its index was bound
+to, and a run reusing another run's ingest inherits that ingest's embedder. The
+summary now resolves the embedder from the space itself, and both readers'
+summaries and exports have been regenerated. The scores did not change; only the
+attribution was wrong. `tests/test_pipeline.py` covers the resolution.
 
 GoodMem uses pgvector HNSW search with `ef_search=400`. This is approximate
 nearest-neighbor search, another difference from the paper's flat index.
 
-The hosted Qwen run supplies about 2,700 evidence tokens per question; the
-Voyage runs supply about 4,800. These counts use characters divided by four as
-an estimate. The different selection depths make context budget part of the
-comparison.
+The depth-15 runs supply about 2,700 evidence tokens per question; the Voyage
+runs at depth 30 supply about 4,800. These counts use characters divided by four
+as an estimate. The paper reports about 4,800 for its own LoCoMo contexts, so
+the depth-15 runs reach their scores on a little over half that budget. The
+different selection depths make context budget part of the comparison.
 
 ### Reading and grading
 
@@ -125,6 +135,23 @@ Coverage is not a strict upper bound on accuracy. The reader may find the answer
 in an unannotated turn, and retrieving every annotated turn does not guarantee a
 correct answer. A sweep is best used to compare coverage and context size, then
 followed by a scored run of the chosen configuration.
+
+Measured on the four depth-15 runs, coverage and accuracy move far less together
+than their spread suggests:
+
+| Reranker | Full coverage | In top-15 | `gpt-4o-mini` | `gpt-4.1-mini` |
+|---|---:|---:|---:|---:|
+| Cohere `rerank-v3.5` | 87.82 | 91.73 | 88.68 | 93.48 |
+| Cohere `rerank-v5.0-pro` | 90.42 | 93.81 | 88.87 | 93.46 |
+| Hosted `qwen3-rerank` | 87.82 | 92.38 | 88.72 | 93.23 |
+
+Cohere's two generations differ by 2.6 points of full coverage and by 0.19 and
+-0.02 points of accuracy. The accuracy differences are smaller than the harness's
+own run-to-run variation, and one of them has the opposite sign to the coverage
+difference. The same pattern appears in the Voyage pair at depth 30, where
+`rerank-3` retrieves 0.65 points less evidence than `rerank-2.5` and scores 0.60
+and 0.06 points higher. On these questions, additional retrieved evidence past
+roughly 88% coverage did not produce a measurable accuracy gain.
 
 ## MemoryAgentBench
 

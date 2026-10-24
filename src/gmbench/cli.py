@@ -18,7 +18,7 @@ from . import config as config_module
 from . import beam, coverage, exact_reranker, export, ingest, judge, mab_run, markdown
 from . import memoryagentbench as mab
 from . import reader, report, retrieve, summary, sweep
-from .client import GoodMemClient
+from .client import GoodMemClient, GoodMemError
 from .locomo import load as load_locomo
 
 _DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "locomo.toml"
@@ -256,6 +256,27 @@ def cmd_judge(args: argparse.Namespace, console: Console) -> int:
     return _emit(cfg, args, console, judgements=judgements, answers=answers)
 
 
+def _embedder_of_record(client: GoodMemClient, cfg: config_module.RunConfig) -> str:
+    """Return the embedder id a run actually queried through.
+
+    Spaces are bound to an embedder at creation, so a run reusing another run's
+    ingest queries that ingest's embedder regardless of what its own config
+    names. Reporting the config value instead attributes the row to a model that
+    never ran -- the same failure the reranker provenance file exists to prevent.
+    Falls back to the configured id when no manifest or space is readable, which
+    is the case for a fresh ingest where the two agree anyway.
+    """
+    bindings = ingest.load_manifest(cfg)
+    for binding in bindings.values():
+        try:
+            resolved = client.space_embedder_id(binding.space_id)
+        except GoodMemError:
+            break
+        if resolved:
+            return resolved
+    return cfg.models.embedder_id
+
+
 def _emit(
     cfg: config_module.RunConfig,
     args: argparse.Namespace,
@@ -273,7 +294,12 @@ def _emit(
     with _client(cfg) as client:
         recorded = exact_reranker.read_provenance(cfg.run_dir)
         models = {
-            "embedder": client.describe_model("embedders", cfg.models.embedder_id),
+            # The index decides which embedder answered, not the config. A run
+            # pointed at an existing ingest inherits that ingest's embedder,
+            # and the config may still name the default one.
+            "embedder": client.describe_model(
+                "embedders", _embedder_of_record(client, cfg)
+            ),
             # A run reranked outside GoodMem must not be described by the
             # reranker left in its config, which was never called.
             "reranker": recorded

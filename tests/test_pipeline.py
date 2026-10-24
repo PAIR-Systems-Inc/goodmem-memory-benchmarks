@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from gmbench.client import GoodMemError, RetrievedChunk
+from gmbench.client import GoodMemError, RetrievedChunk, space_embedder_id
 from gmbench.coverage import compute
 from gmbench.judge import JudgeRecord, accuracy_by_category, parse_label
 from gmbench.locomo import Conversation, Question, Turn, load
@@ -1405,3 +1405,37 @@ def test_documented_env_names_are_names_the_loader_reads() -> None:
         f"README exports {sorted(unread)}, which nothing in config.py reads; "
         f"the loader reads {sorted(read_by_loader)}"
     )
+
+
+def test_a_space_names_the_embedder_that_answered() -> None:
+    """The space's own binding decides the embedder, not the run's config.
+
+    ``paper-exact`` reused another run's ingest and published a summary naming
+    ``voyage-4-large`` while every query went through the ``text-embedding-3-small``
+    index it had been pointed at. Reporting the configured id attributes a row to
+    a model that never ran.
+    """
+    record = {
+        "name": "gmbench-locomo-conv-26-paper-models",
+        "spaceEmbedders": [
+            {"embedderId": "019ced53-text-embedding-3-small", "defaultRetrievalWeight": 1.0}
+        ],
+    }
+    assert space_embedder_id(record) == "019ced53-text-embedding-3-small"
+
+
+def test_the_heaviest_embedder_is_the_one_a_query_goes_through() -> None:
+    """A multi-embedder space is described by the binding retrieval actually uses."""
+    record = {
+        "spaceEmbedders": [
+            {"embedderId": "secondary", "defaultRetrievalWeight": 0.25},
+            {"embedderId": "primary", "defaultRetrievalWeight": 1.0},
+        ]
+    }
+    assert space_embedder_id(record) == "primary"
+
+
+def test_an_unreadable_space_does_not_invent_an_embedder() -> None:
+    """With nothing to read, return empty so the caller falls back rather than lies."""
+    assert space_embedder_id({}) == ""
+    assert space_embedder_id({"spaceEmbedders": []}) == ""

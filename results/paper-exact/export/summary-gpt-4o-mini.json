@@ -6,14 +6,15 @@
   "judge_model": "gpt-4o-mini-2024-07-18",
   "judge_repetitions": 3,
   "embedder": {
-    "provider": "VOYAGE",
-    "model": "voyage-4-large",
-    "display_name": "Voyage 4 Large"
+    "provider": "OPENAI",
+    "model": "text-embedding-3-small",
+    "display_name": "OpenAI text-embedding-3-small"
   },
   "reranker": {
-    "provider": "VOYAGE",
-    "model": "rerank-2.5",
-    "display_name": "voyage-rerank-2.5"
+    "provider": "EXTERNAL",
+    "model": "Qwen/Qwen3-Reranker-4B",
+    "display_name": "Qwen3-Reranker-4B, driven directly (paper table 11)",
+    "note": "Scored outside GoodMem by tools/qwen3_reranker.py, applying the yes/no relevance template the checkpoint requires with the paper's appendix G.1 instruction. int8 weights. GoodMem supplied the index and the dense top-128."
   },
   "retrieval": {
     "dense_candidates": 128,

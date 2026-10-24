@@ -16,10 +16,14 @@ attribution and other limits of the comparison.
 
 | Configuration | Reader | GoodMem | 95% CI | RAW-RAG | vs RAW-RAG | Best agentic | vs best agentic |
 |---|---|---:|---|---:|---|---:|---|
+| Cohere rerank-v5.0-pro | `gpt-4.1-mini` | **93.46** | [92.21, 94.63] | 93.70 | tie (-0.24) | 91.69 | ahead (+1.77) |
+| Cohere rerank-v5.0-pro | `gpt-4o-mini` | **88.87** | [87.29, 90.37] | 89.07 | tie (-0.20) | 88.12 | tie (+0.75) |
 | Hosted substitute | `gpt-4.1-mini` | **93.23** | [91.99, 94.42] | 93.70 | tie (-0.47) | 91.69 | ahead (+1.54) |
 | Hosted substitute | `gpt-4o-mini` | **88.72** | [87.19, 90.24] | 89.07 | tie (-0.35) | 88.12 | tie (+0.60) |
-| Paper reranker | `gpt-4.1-mini` | **93.42** | [92.19, 94.59] | 93.70 | tie (-0.28) | 91.69 | ahead (+1.73) |
-| Paper reranker | `gpt-4o-mini` | **88.66** | [87.10, 90.17] | 89.07 | tie (-0.41) | 88.12 | tie (+0.54) |
+| Paper reranker (table 11) | `gpt-4.1-mini` | **93.42** | [92.19, 94.59] | 93.70 | tie (-0.28) | 91.69 | ahead (+1.73) |
+| Paper reranker (table 11) | `gpt-4o-mini` | **88.66** | [87.10, 90.17] | 89.07 | tie (-0.41) | 88.12 | tie (+0.54) |
+| Paper stack (table 10) | `gpt-4.1-mini` | **93.48** | [92.27, 94.68] | 93.70 | tie (-0.22) | 91.69 | ahead (+1.79) |
+| Paper stack (table 10) | `gpt-4o-mini` | **88.68** | [87.14, 90.19] | 89.07 | tie (-0.39) | 88.12 | tie (+0.56) |
 | Voyage rerank-2.5 | `gpt-4.1-mini` | **94.29** | [93.14, 95.37] | 93.70 | tie (+0.59) | 91.69 | ahead (+2.60) |
 | Voyage rerank-2.5 | `gpt-4o-mini` | **87.84** | [86.19, 89.37] | 89.07 | tie (-1.23) | 88.12 | tie (-0.28) |
 | Voyage rerank-3 | `gpt-4.1-mini` | **94.35** | [93.20, 95.45] | 93.70 | tie (+0.65) | 91.69 | ahead (+2.66) |
@@ -27,10 +31,40 @@ attribution and other limits of the comparison.
 
 ## Configurations
 
+- **Cohere rerank-v5.0-pro** — embedder `text-embedding-3-small`, reranker `rerank-v5.0-pro`, 128 dense candidates to top-15
 - **Hosted substitute** — embedder `text-embedding-3-small`, reranker `qwen3-rerank`, 128 dense candidates to top-15
-- **Paper reranker** — embedder `voyage-4-large`, reranker `Qwen/Qwen3-Reranker-4B`, 128 dense candidates to top-15
+- **Paper reranker (table 11)** — embedder `text-embedding-3-small`, reranker `Qwen/Qwen3-Reranker-4B`, 128 dense candidates to top-15
+- **Paper stack (table 10)** — embedder `text-embedding-3-small`, reranker `rerank-v3.5`, 128 dense candidates to top-15
 - **Voyage rerank-2.5** — embedder `voyage-4-large`, reranker `rerank-2.5`, 128 dense candidates to top-30
 - **Voyage rerank-3** — embedder `voyage-4-large`, reranker `rerank-3`, 128 dense candidates to top-30
+
+## Cohere rerank-v5.0-pro — `gpt-4.1-mini`
+
+| Category | N | GoodMem | 95% CI | RAW-RAG | Best agentic | Verdict |
+|---|---:|---:|---|---:|---:|---|
+| Single-hop | 841 | 96.23 | [94.93, 97.42] | 96.79 | 95.12 | tie (-0.56) |
+| Multi-hop | 282 | 92.32 | [89.13, 95.15] | 92.32 | 88.30 | tie (-0.00) |
+| Temporal | 321 | 91.07 | [87.85, 93.98] | 90.86 | 91.59 | tie (+0.21) |
+| Open-domain | 96 | 80.56 | [72.57, 87.85] | 80.21 | 76.04 | tie (+0.35) |
+| **Overall** | 1540 | 93.46 | [92.21, 94.63] | 93.70 | 91.69 | tie (-0.24) |
+
+Mean evidence supplied to the reader: 58 turns, 10,836 characters (~2,709 tokens).
+
+Integrity: clean (1540 questions scored).
+
+## Cohere rerank-v5.0-pro — `gpt-4o-mini`
+
+| Category | N | GoodMem | 95% CI | RAW-RAG | Best agentic | Verdict |
+|---|---:|---:|---|---:|---:|---|
+| Single-hop | 841 | 94.02 | [92.39, 95.60] | 94.57 | 93.94 | tie (-0.55) |
+| Multi-hop | 282 | 90.66 | [87.23, 93.85] | 85.93 | 84.04 | ahead (+4.73) |
+| Temporal | 321 | 78.71 | [74.25, 83.07] | 82.04 | 80.69 | tie (-3.33) |
+| Open-domain | 96 | 72.57 | [63.54, 81.25] | 73.61 | 73.96 | tie (-1.04) |
+| **Overall** | 1540 | 88.87 | [87.29, 90.37] | 89.07 | 88.12 | tie (-0.20) |
+
+Mean evidence supplied to the reader: 58 turns, 10,836 characters (~2,709 tokens).
+
+Integrity: clean (1540 questions scored).
 
 ## Hosted substitute — `gpt-4.1-mini`
 
@@ -60,7 +94,7 @@ Mean evidence supplied to the reader: 62 turns, 10,775 characters (~2,694 tokens
 
 Integrity: clean (1540 questions scored).
 
-## Paper reranker — `gpt-4.1-mini`
+## Paper reranker (table 11) — `gpt-4.1-mini`
 
 | Category | N | GoodMem | 95% CI | RAW-RAG | Best agentic | Verdict |
 |---|---:|---:|---|---:|---:|---|
@@ -74,7 +108,7 @@ Mean evidence supplied to the reader: 60 turns, 10,874 characters (~2,718 tokens
 
 Integrity: needs review (1540 questions scored).
 
-## Paper reranker — `gpt-4o-mini`
+## Paper reranker (table 11) — `gpt-4o-mini`
 
 | Category | N | GoodMem | 95% CI | RAW-RAG | Best agentic | Verdict |
 |---|---:|---:|---|---:|---:|---|
@@ -85,6 +119,34 @@ Integrity: needs review (1540 questions scored).
 | **Overall** | 1540 | 88.66 | [87.10, 90.17] | 89.07 | 88.12 | tie (-0.41) |
 
 Mean evidence supplied to the reader: 60 turns, 10,874 characters (~2,718 tokens).
+
+Integrity: clean (1540 questions scored).
+
+## Paper stack (table 10) — `gpt-4.1-mini`
+
+| Category | N | GoodMem | 95% CI | RAW-RAG | Best agentic | Verdict |
+|---|---:|---:|---|---:|---:|---|
+| Single-hop | 841 | 96.12 | [94.77, 97.34] | 96.79 | 95.12 | tie (-0.67) |
+| Multi-hop | 282 | 91.13 | [87.71, 94.21] | 92.32 | 88.30 | tie (-1.19) |
+| Temporal | 321 | 92.00 | [88.89, 94.81] | 90.86 | 91.59 | tie (+1.14) |
+| Open-domain | 96 | 82.29 | [74.65, 89.24] | 80.21 | 76.04 | tie (+2.08) |
+| **Overall** | 1540 | 93.48 | [92.27, 94.68] | 93.70 | 91.69 | tie (-0.22) |
+
+Mean evidence supplied to the reader: 60 turns, 10,883 characters (~2,721 tokens).
+
+Integrity: clean (1540 questions scored).
+
+## Paper stack (table 10) — `gpt-4o-mini`
+
+| Category | N | GoodMem | 95% CI | RAW-RAG | Best agentic | Verdict |
+|---|---:|---:|---|---:|---:|---|
+| Single-hop | 841 | 93.78 | [92.11, 95.32] | 94.57 | 93.94 | tie (-0.79) |
+| Multi-hop | 282 | 87.94 | [84.04, 91.49] | 85.93 | 84.04 | tie (+2.01) |
+| Temporal | 321 | 80.48 | [76.12, 84.63] | 82.04 | 80.69 | tie (-1.56) |
+| Open-domain | 96 | 73.61 | [65.28, 81.94] | 73.61 | 73.96 | tie (+0.00) |
+| **Overall** | 1540 | 88.68 | [87.14, 90.19] | 89.07 | 88.12 | tie (-0.39) |
+
+Mean evidence supplied to the reader: 60 turns, 10,883 characters (~2,721 tokens).
 
 Integrity: clean (1540 questions scored).
 

@@ -11,26 +11,34 @@ the context GoodMem provides.
 
 ## Results
 
-On LoCoMo, all eight runs place the paper's RAW-RAG score within the GoodMem
+On LoCoMo, all twelve runs place the paper's RAW-RAG score within the GoodMem
 run's 95% bootstrap interval. The results are consistent with the paper's finding
 that straightforward retrieval can perform well on these tasks.
 
+The first row uses table 10's retrieval stack: `text-embedding-3-small` with
+Cohere Rerank-v3.5, 128 candidates narrowed to 15. It is the one configuration
+here that matches a published row model for model.
+
 | LoCoMo configuration | `gpt-4o-mini` | `gpt-4.1-mini` |
 |---|---:|---:|
-| Hosted Qwen reranker | 88.72 | 93.23 |
+| Table 10 stack: Cohere `rerank-v3.5` | 88.68 | 93.48 |
 | Qwen3-Reranker-4B, run locally | 88.66 | 93.42* |
+| Hosted Qwen reranker | 88.72 | 93.23 |
+| Cohere `rerank-v5.0-pro` | 88.87 | 93.46 |
 | Voyage `rerank-2.5` | 87.84 | 94.29 |
 | Voyage `rerank-3` | 88.44 | 94.35 |
 | RAW-RAG, paper table 10 | 89.07 | 93.70 |
 
-These configurations use different retrieval models and context sizes. None is
-an exact reproduction of a table 10 or table 11 row. The local Qwen run also has
-conflicting model labels in its saved records; see the
+The first four rows share one index and one candidate depth, so the reranker is
+the only difference between them. They span 0.21 points with `gpt-4o-mini` and
+0.25 with `gpt-4.1-mini`, across four rerankers from three vendors and two
+Cohere generations. The two Voyage rows select 30 chunks rather than 15, so they
+differ in context budget as well as reranker. See the
 [comparison details](docs/methodology.md#retrieval-configurations).
 
 \* Two answers hit the token limit before producing a final-answer marker. Both
 received full credit under the paper's extraction rule. Scoring both as wrong
-would lower the result from 93.42 to 93.29. The other seven runs passed the
+would lower the result from 93.42 to 93.29. The other eleven runs passed the
 harness's integrity checks.
 
 MemoryAgentBench covers a broader range of tasks. With `gpt-4o-mini`, GoodMem
