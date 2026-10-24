@@ -105,11 +105,14 @@ Raising it would have made the row less comparable to the other five, which all
 used 4,096 and all came back clean — the opposite of the point. The other five
 rows are clean: 4,620 judgements each, no reader or judge failures.
 
-> **One gap remains.** Cohere Rerank-v3.5, the reranker in the paper's table 10,
-> has never been run here: this instance has no Cohere credential. Table 11's
-> `Qwen3-Reranker-4B` is scored above, and the two published settings land within
-> 0.06 points of each other for `gpt-4o-mini`, so the unmeasured one is unlikely
-> to say anything different — but it is unmeasured, not equivalent.
+> **One gap remains, and it is pending rather than closed.** Cohere Rerank-v3.5,
+> the reranker in the paper's table 10, has not been run: no Cohere credential is
+> configured on this instance. Table 11's `Qwen3-Reranker-4B` is scored above,
+> and the paper's two settings land within 0.06 points of each other for
+> `gpt-4o-mini`, so the unmeasured one is unlikely to say anything different —
+> but unlikely is not measured, and this row is absent rather than equivalent.
+> [The command sequence is recorded](#adding-the-table-10-row) so it is turnkey
+> once a key exists.
 
 ### How to read a verdict
 
@@ -179,7 +182,8 @@ other for the `gpt-4o-mini` reader:
 | Table 11 | Qwen3-Embedding-4B | Qwen3-Reranker-4B | 89.13 / 94.55 |
 
 Table 11's checkpoint is now scored end to end. Neither reranker was usable *as
-served*: Cohere needs a credential this instance does not have, and
+served*: Cohere needs a credential this instance does not have — see
+[adding the table 10 row](#adding-the-table-10-row) — and
 Qwen3-Reranker-4B is present over vLLM and *inverted* — see below. So the
 checkpoint is driven directly instead, by `tools/qwen3_reranker.py`, applying the
 yes/no relevance template it requires with the paper's appendix G.1 instruction.
@@ -272,6 +276,41 @@ plausible scores in the right shape, and the only symptom is a worse number
 somewhere downstream. A 30-point drop could have been the chunking, the embedder,
 the prompt, the judge or the index. Coverage located the one wrong stage in a
 single command, before a reader token was spent.
+
+### Adding the table 10 row
+
+Cohere Rerank-v3.5 is the only published setting not measured here. With a Cohere
+key, registering it and scoring the row is mechanical — the embedder, chunking,
+depths, prompts and grading are already the paper's, and the index can be reused:
+
+```bash
+# 1. Register the reranker on the GoodMem instance (Cohere provider, rerank-v3.5),
+#    then check it before spending reader tokens on it:
+gmbench --config config/locomo-paper.toml --ingest-tag paper-qwen3 \
+        verify-reranker --rerankers <new-uuid>
+
+# 2. Score the row, reusing the existing index:
+export GMBENCH_PAPER_RERANKER_ID=<new-uuid>
+for m in gpt-4o-mini gpt-4.1-mini; do
+  gmbench --config config/locomo-paper.toml --run-tag paper-cohere \
+          --ingest-tag paper-qwen3 --reader-model "$m" retrieve
+  gmbench --config config/locomo-paper.toml --run-tag paper-cohere \
+          --ingest-tag paper-qwen3 --reader-model "$m" read
+  gmbench --config config/locomo-paper.toml --run-tag paper-cohere \
+          --ingest-tag paper-qwen3 --reader-model "$m" judge
+  gmbench --config config/locomo-paper.toml --run-tag paper-cohere \
+          --ingest-tag paper-qwen3 --reader-model "$m" export
+done
+
+# 3. Regenerate the tables with the new row included:
+gmbench --config config/locomo-paper.toml table \
+        --runs "Cohere=paper-cohere" "Paper reranker=paper-exact" \
+                "Hosted substitute=paper-qwen3" "Voyage=voyage4l-k30" \
+        --out RESULTS.md
+```
+
+`verify-reranker` exits non-zero if the reranker scores below the dense-only
+baseline, which is what caught a broken endpoint here once already.
 
 ### The Voyage configuration
 
@@ -366,6 +405,11 @@ plausible number is not, so the harness is built to make the second impossible.
 | **BEAM-1M** | — | Fully measured: 1,710 messages, 1.43 h, flat per-message cost |
 | LongMemEval-S | 500 | Data acquired and verified, adapter not written |
 | PersonaMem-v2 | 5,000 | Data acquired and verified, adapter not written |
+
+Known gaps, stated once: Cohere Rerank-v3.5 (the paper's table 10 reranker) is
+pending a credential, with [the commands recorded](#adding-the-table-10-row); the
+two remaining benchmarks have verified data and no adapter; and LongMemEval
+*within* MemoryAgentBench, at 36.33, is where the measured headroom is.
 
 ### MemoryAgentBench
 
