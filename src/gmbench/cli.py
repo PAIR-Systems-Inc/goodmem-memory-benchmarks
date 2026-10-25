@@ -459,6 +459,36 @@ def cmd_mab_inspect(args: argparse.Namespace, console: Console) -> int:
     return 0
 
 
+def _mab_embedder_of_record(
+    client: GoodMemClient,
+    cfg: config_module.RunConfig,
+    blocks: list,
+    capability: str,
+) -> str:
+    """Return the embedder id this capability's blocks were indexed with.
+
+    Each block has its own space, bound to an embedder when it was created, so
+    the space is what says which encoder answered. Falls back to the configured
+    id when no space for this capability can be read.
+    """
+    wanted = {b.block_id for b in blocks if b.capability == capability}
+    if wanted:
+        names = {
+            mab_run.space_name(b, cfg.run_tag): b
+            for b in blocks
+            if b.block_id in wanted
+        }
+        try:
+            for space in client.list_spaces():
+                if space.get("name") in names:
+                    resolved = client.space_embedder_id(space["spaceId"])
+                    if resolved:
+                        return resolved
+        except GoodMemError:
+            pass
+    return cfg.models.embedder_id
+
+
 def cmd_mab(args: argparse.Namespace, console: Console) -> int:
     """Ingests and scores one MemoryAgentBench capability group."""
     cfg = _load(args)
@@ -480,9 +510,15 @@ def cmd_mab(args: argparse.Namespace, console: Console) -> int:
             dataset_dir=directory,
             resume=not args.no_resume,
         )
+        models = {
+            "embedder": client.describe_model(
+                "embedders", _mab_embedder_of_record(client, cfg, blocks, args.capability)
+            ),
+            "reranker": client.describe_model("rerankers", cfg.models.reranker_id),
+        }
 
     document = mab_run.summarize(outcomes)
-    path = mab_run.write_summary(cfg, args.capability, document)
+    path = mab_run.write_summary(cfg, args.capability, document, models)
 
     table = Table(title=f"MemoryAgentBench — {args.capability}, reader={cfg.models.reader_model}")
     table.add_column("Source", style="bold")

@@ -251,7 +251,9 @@ def mab_section(results_dir: Path) -> list[str]:
     for path in sorted(results_dir.glob("*/export/mab-*-summary-*.json")):
         run = path.parent.parent.name
         # Retain archived runs on disk while excluding them from the tables.
-        if "broken" in run or run.startswith("_"):
+        # "broken" marks a run with a defect, "superseded" one that is sound but
+        # measured on a stack a later run replaced.
+        if "broken" in run or "superseded" in run or run.startswith("_"):
             continue
         data = json.loads(path.read_text())
         capability = data["capability"]

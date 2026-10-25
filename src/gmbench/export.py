@@ -111,7 +111,10 @@ def run(config: RunConfig) -> list[Artifact]:
             Artifact(target, target.stat().st_size, "capability scores and per-source detail")
         )
     for outcomes in sorted(config.run_dir.glob("mab-*-gpt-*.jsonl")):
-        target = out_dir / f"outcomes-{model}.jsonl.gz"
+        # Keep the shard's own name, which carries the capability. One run tag
+        # can hold all four capability groups, and a single "outcomes" file per
+        # reader silently kept only the last one exported.
+        target = out_dir / f"{outcomes.stem}.jsonl.gz"
         artifacts.append(
             Artifact(
                 target,

@@ -628,8 +628,19 @@ def capability_score(by_source: dict[str, dict[str, Any]]) -> float:
     return sum(scores) / len(scores)
 
 
-def write_summary(config: RunConfig, capability: str, document: dict[str, Any]) -> Path:
-    """Write the capability summary and return its path."""
+def write_summary(
+    config: RunConfig,
+    capability: str,
+    document: dict[str, Any],
+    models: dict[str, Any] | None = None,
+) -> Path:
+    """Write the capability summary and return its path.
+
+    ``models`` names the embedder and reranker that produced the ranking. A
+    summary without them cannot be compared against a published number, because
+    nothing in the record says which retrieval stack it came from -- a gap that
+    left an earlier MemoryAgentBench run unattributable after the fact.
+    """
     path = config.run_dir / f"mab-{capability}-summary-{config.models.reader_model}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -642,11 +653,7 @@ def write_summary(config: RunConfig, capability: str, document: dict[str, Any]) 
             "final_k": config.retrieval.final_k,
         },
         "scoring": "substring containment against the acceptable gold strings",
-        "scope_note": (
-            "Only this capability group was scored. The other three ship as a "
-            "verified adapter; their contexts run to millions of characters per "
-            "block and were out of budget here."
-        ),
+        **({"embedder": models["embedder"], "reranker": models["reranker"]} if models else {}),
         **document,
     }
     path.write_text(json.dumps(payload, indent=2) + "\n")

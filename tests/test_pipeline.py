@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from gmbench import mab_run, markdown
 from gmbench.client import GoodMemError, RetrievedChunk, space_embedder_id
 from gmbench.coverage import compute
 from gmbench.judge import JudgeRecord, accuracy_by_category, parse_label
@@ -1439,3 +1440,77 @@ def test_an_unreadable_space_does_not_invent_an_embedder() -> None:
     """With nothing to read, return empty so the caller falls back rather than lies."""
     assert space_embedder_id({}) == ""
     assert space_embedder_id({"spaceEmbedders": []}) == ""
+
+
+def test_a_mab_summary_records_the_stack_that_produced_it(tmp_path) -> None:
+    """A capability score is uncomparable without the retrieval stack beside it.
+
+    The first MemoryAgentBench runs recorded reader, depths and scoring rule but
+    no embedder or reranker, so the published 51.44 could not afterwards be
+    checked against the paper's stack. Naming them is what makes the comparison
+    verifiable rather than asserted.
+    """
+    config = _run_config(tmp_path)
+    models = {
+        "embedder": {"provider": "OPENAI", "model": "text-embedding-3-small"},
+        "reranker": {"provider": "COHERE", "model": "rerank-v3.5"},
+    }
+    path = mab_run.write_summary(
+        config, "accurate_retrieval", {"accuracy": 71.48, "by_source": {}}, models
+    )
+    written = json.loads(path.read_text())
+    assert written["embedder"]["model"] == "text-embedding-3-small"
+    assert written["reranker"]["model"] == "rerank-v3.5"
+
+
+def test_a_mab_summary_without_a_stack_omits_the_keys_rather_than_faking_them(tmp_path) -> None:
+    """Absent models must be absent, not empty strings that read as a real answer."""
+    path = mab_run.write_summary(
+        _run_config(tmp_path), "conflict_resolution", {"accuracy": 51.5, "by_source": {}}
+    )
+    written = json.loads(path.read_text())
+    assert "embedder" not in written
+    assert "reranker" not in written
+
+
+def _mab_export(root, run: str, capability: str, accuracy: float) -> None:
+    """Write a minimal MemoryAgentBench export under ``run``."""
+    out = root / run / "export"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / f"mab-{capability}-summary-gpt-4o-mini.json").write_text(
+        json.dumps(
+            {
+                "capability": capability,
+                "questions": 100,
+                "accuracy": accuracy,
+                "errors": 0,
+                "by_source": {},
+            }
+        )
+    )
+
+
+def test_a_superseded_run_is_kept_on_disk_but_left_out_of_the_tables(tmp_path) -> None:
+    """A sound run measured on a replaced stack must not compete with its successor.
+
+    The MemoryAgentBench groups were first scored on a Voyage index, then
+    rescored on the paper's own stack. Both are worth keeping, but only one can
+    be the reported number, and a directory holding the other would otherwise
+    collide with it.
+    """
+    _mab_export(tmp_path, "mab-matched", "conflict_resolution", 52.5)
+    _mab_export(tmp_path, "mab-cr-superseded-voyage-stack", "conflict_resolution", 51.5)
+
+    lines = markdown.mab_section(tmp_path)
+    body = "\n".join(lines)
+    assert "52.50" in body
+    assert "51.50" not in body
+
+
+def test_two_live_runs_for_one_capability_still_fail_loudly(tmp_path) -> None:
+    """Without an archive marker the ambiguity must stop the report, not pick one."""
+    _mab_export(tmp_path, "mab-matched", "conflict_resolution", 52.5)
+    _mab_export(tmp_path, "mab-other", "conflict_resolution", 51.5)
+
+    with pytest.raises(ValueError, match="two live runs"):
+        markdown.mab_section(tmp_path)

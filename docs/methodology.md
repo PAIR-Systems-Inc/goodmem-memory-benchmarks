@@ -178,26 +178,42 @@ gives that mean the same weight as ReDial. Overall accuracy is the mean of the
 four capability scores. This is the aggregation in appendix D.5; averaging all
 2,071 questions together would answer a different question.
 
+The reported runs use the retrieval stack the paper's MemoryAgentBench
+conditions use, given in appendix C.3: 256-token windows embedded with
+`text-embedding-3-small`, 128 candidates by cosine similarity, and the final 15
+selected by the cross-encoder that setting pairs with that embedder, Cohere
+Rerank-v3.5. Display-time turn expansion is disabled, and the two fact
+consolidation sources index one complete fact per chunk.
+
 | Capability | Questions | GoodMem | RAW-RAG |
 |---|---:|---:|---:|
-| Accurate Retrieval | 1,000 | 71.48 | 67.85 |
-| Test-Time Learning | 700 | 46.35 | 47.68 |
-| Long-Range Understanding | 171 | 36.43 | 31.74 |
-| Conflict Resolution | 200 | 51.50 | 46.00 |
-| Overall | 2,071 | 51.44 | 48.32 |
+| Accurate Retrieval | 1,000 | 68.70 | 67.85 |
+| Test-Time Learning | 700 | 51.20 | 47.68 |
+| Long-Range Understanding | 171 | 35.88 | 31.74 |
+| Conflict Resolution | 200 | 52.50 | 46.00 |
+| Overall | 2,071 | 52.07 | 48.32 |
 
 These runs have no recorded errors. They are single measurements, so the table
 alone does not establish the uncertainty of the differences.
 
-Performance varies substantially by source. EventQA scores 93.60 and single-hop
-fact consolidation 94.00. Multi-hop fact consolidation scores 9.00: a question
+An earlier set of runs used a `voyage-4-large` index with `rerank-2.5` and
+scored 52.07's predecessor, 51.44. Those runs are retained under
+`results/mab-*-superseded-voyage-stack/` and excluded from the tables. The
+comparison between them is informative, because the retrieval stack matters
+more here than it does on LoCoMo. The Voyage stack scored 7.80 points higher on
+EventQA and 17.00 lower on fine-grained TREC intent classification; the paper's
+own ablation likewise finds that removing reranking costs MemoryAgentBench 3.92
+points, against a reranker-choice effect on LoCoMo of under a quarter point.
+
+Performance varies substantially by source. Single-hop fact consolidation scores
+93.00 and EventQA 85.80. Multi-hop fact consolidation scores 12.00: a question
 may name one entity while the fact containing its answer names an intermediate
 entity. A single retrieval query often misses that connection.
 
-InfBench scores 2.44. Its reader receives 15 passages from a book that can run
+InfBench scores 2.74. Its reader receives 15 passages from a book that can run
 to millions of characters, then must cover 25 plot points in a summary. This
 provides limited access to material spread across the book. LongMemEval within
-MemoryAgentBench scores 36.33; it uses shared context blocks and should not be
+MemoryAgentBench scores 37.00; it uses shared context blocks and should not be
 compared directly with the standalone LongMemEval-S setting.
 
 ## BEAM ingestion time

@@ -234,30 +234,30 @@ scores. No comparison interval is estimated for these results.
 
 | Capability | N | GoodMem | RAW-RAG | Verdict | Errors |
 |---|---:|---:|---:|---|---:|
-| Accurate Retrieval | 1000 | 71.48 | 67.85 | ahead (+3.63) | 0 |
-| Test-Time Learning | 700 | 46.35 | 47.68 | behind (-1.33) | 0 |
-| Long-Range Understanding | 171 | 36.43 | 31.74 | ahead (+4.69) | 0 |
-| Conflict Resolution | 200 | 51.50 | 46.00 | ahead (+5.50) | 0 |
-| **Overall** (mean of four) | 2071 | **51.44** | 48.32 | ahead (+3.12) | — |
+| Accurate Retrieval | 1000 | 68.70 | 67.85 | ahead (+0.85) | 0 |
+| Test-Time Learning | 700 | 51.20 | 47.68 | ahead (+3.52) | 0 |
+| Long-Range Understanding | 171 | 35.88 | 31.74 | ahead (+4.14) | 0 |
+| Conflict Resolution | 200 | 52.50 | 46.00 | ahead (+6.50) | 0 |
+| **Overall** (mean of four) | 2071 | **52.07** | 48.32 | ahead (+3.75) | — |
 
 ### By source
 
 | Capability | Source | N | Accuracy | Errors |
 |---|---|---:|---:|---:|
-| Accurate Retrieval | `ruler_qa1` | 100 | 87.00 | 0 |
-| Accurate Retrieval | `ruler_qa2` | 100 | 69.00 | 0 |
-| Accurate Retrieval | `eventqa` | 500 | 93.60 | 0 |
-| Accurate Retrieval | `longmemeval` | 300 | 36.33 | 0 |
-| Test-Time Learning | `recsys_redial` | 200 | 20.50 | 0 |
-| Test-Time Learning | `icl_banking77` | 100 | 87.00 | 0 |
-| Test-Time Learning | `icl_clinic150` | 100 | 86.00 | 0 |
+| Accurate Retrieval | `ruler_qa1` | 100 | 85.00 | 0 |
+| Accurate Retrieval | `ruler_qa2` | 100 | 67.00 | 0 |
+| Accurate Retrieval | `eventqa` | 500 | 85.80 | 0 |
+| Accurate Retrieval | `longmemeval` | 300 | 37.00 | 0 |
+| Test-Time Learning | `recsys_redial` | 200 | 23.00 | 0 |
+| Test-Time Learning | `icl_banking77` | 100 | 91.00 | 0 |
+| Test-Time Learning | `icl_clinic150` | 100 | 88.00 | 0 |
 | Test-Time Learning | `icl_nlu` | 100 | 86.00 | 0 |
-| Test-Time Learning | `icl_trec_coarse` | 100 | 61.00 | 0 |
-| Test-Time Learning | `icl_trec_fine` | 100 | 41.00 | 0 |
-| Long-Range Understanding | `infbench_sum` | 100 | 2.44 | 0 |
-| Long-Range Understanding | `detective_qa` | 71 | 70.42 | 0 |
-| Conflict Resolution | `factconsolidation_mh` | 100 | 9.00 | 0 |
-| Conflict Resolution | `factconsolidation_sh` | 100 | 94.00 | 0 |
+| Test-Time Learning | `icl_trec_coarse` | 100 | 74.00 | 0 |
+| Test-Time Learning | `icl_trec_fine` | 100 | 58.00 | 0 |
+| Long-Range Understanding | `infbench_sum` | 100 | 2.74 | 0 |
+| Long-Range Understanding | `detective_qa` | 71 | 69.01 | 0 |
+| Conflict Resolution | `factconsolidation_mh` | 100 | 12.00 | 0 |
+| Conflict Resolution | `factconsolidation_sh` | 100 | 93.00 | 0 |
 
 ---
 

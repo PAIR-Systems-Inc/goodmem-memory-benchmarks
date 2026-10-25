@@ -42,9 +42,16 @@ would lower the result from 93.42 to 93.29. The other eleven runs passed the
 harness's integrity checks.
 
 MemoryAgentBench covers a broader range of tasks. With `gpt-4o-mini`, GoodMem
-scored **51.44**, compared with RAW-RAG's **48.32**, using the paper's aggregation
-formula. It scored higher on three of four capability groups; Test-Time Learning
-was 1.33 points lower. These are single-run comparisons.
+scored **52.07**, compared with RAW-RAG's **48.32**, using the paper's aggregation
+formula. It scored higher on all four capability groups, with no errors across
+the 2,071 questions. These are single-run comparisons.
+
+This run uses the stack the paper's MemoryAgentBench conditions use
+(appendix C.3): `text-embedding-3-small`, 128 candidates narrowed to 15, Cohere
+Rerank-v3.5. An earlier run on a Voyage index scored 51.44 and is kept under
+`results/mab-*-superseded-voyage-stack/`. Unlike LoCoMo, where the reranker
+barely moves the score, the retrieval stack matters here: the two runs differ by
+up to 7.8 points on an individual source, in both directions.
 
 BEAM measures ingestion time. GoodMem stored its 1,710-message conversation in
 **1.43 hours**, averaging **3.004 seconds per message** under sequential
